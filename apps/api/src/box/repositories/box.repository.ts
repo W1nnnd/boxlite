@@ -19,8 +19,7 @@ import { BaseRepository } from '../../common/repositories/base.repository'
 import { BoxEvents } from '../constants/box-events.constants'
 import { BoxStateUpdatedEvent } from '../events/box-state-updated.event'
 import { BoxDesiredStateUpdatedEvent } from '../events/box-desired-state-updated.event'
-import { BoxPublicStatusUpdatedEvent } from '../events/box-public-status-updated.event'
-import { isInboundEnabled } from '../utils/network-policy.util'
+import { BoxInboundModeUpdatedEvent } from '../events/box-inbound-mode-updated.event'
 import { BoxOrganizationUpdatedEvent } from '../events/box-organization-updated.event'
 import { BoxLookupCacheInvalidationService } from '../services/box-lookup-cache-invalidation.service'
 import { BoxCreationAdmissionUnavailableError, BoxCreationLimitExceededError } from '../errors/box-creation-limit.error'
@@ -537,12 +536,8 @@ export class BoxRepository extends BaseRepository<Box> {
 
     if (previousBox.inboundMode !== updatedBox.inboundMode) {
       this.eventEmitter.emit(
-        BoxEvents.PUBLIC_STATUS_UPDATED,
-        new BoxPublicStatusUpdatedEvent(
-          updatedBox,
-          isInboundEnabled(previousBox.inboundMode),
-          isInboundEnabled(updatedBox.inboundMode),
-        ),
+        BoxEvents.INBOUND_MODE_UPDATED,
+        new BoxInboundModeUpdatedEvent(updatedBox, previousBox.inboundMode, updatedBox.inboundMode),
       )
     }
 

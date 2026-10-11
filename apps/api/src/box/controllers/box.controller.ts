@@ -411,13 +411,13 @@ export class BoxController {
   @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.WRITE_BOXES])
   @UseGuards(BoxAccessGuard)
   @Audit({
-    action: AuditAction.UPDATE_PUBLIC_STATUS,
+    action: AuditAction.UPDATE_INBOUND_ACCESS,
     targetType: AuditTarget.BOX,
     targetIdFromRequest: (req) => req.params.boxIdOrName,
     targetIdFromResult: (result: BoxDto) => result?.id,
     requestMetadata: {
       params: (req) => ({
-        isPublic: req.params.isPublic,
+        mode: inboundModeFromPublic(String(req.params.isPublic) === 'true'),
       }),
     },
   })

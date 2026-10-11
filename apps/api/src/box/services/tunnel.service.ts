@@ -13,7 +13,7 @@ import { Tunnel } from '../entities/tunnel.entity'
 import { NetworkMode } from '../enums/network-mode.enum'
 
 const TERMINAL_PORT = 22222
-// Same window as the other preview checks (preview:public, preview:token): the proxy
+// Same window as the other preview checks (preview:inbound, preview:token): the proxy
 // asks on every request, and a revoked or unpublished tunnel stays open this long.
 const ACCESS_CACHE_TTL_SECONDS = 3
 

@@ -7,12 +7,25 @@
 import Redis from 'ioredis'
 import { Controller, Get, Param, Logger, NotFoundException, UseGuards, Req, ParseIntPipe } from '@nestjs/common'
 import { BoxService } from '../services/box.service'
-import { ApiResponse, ApiOperation, ApiParam, ApiTags, ApiOAuth2, ApiBearerAuth, ApiExcludeEndpoint } from '@nestjs/swagger'
+import {
+  ApiResponse,
+  ApiOperation,
+  ApiParam,
+  ApiTags,
+  ApiOAuth2,
+  ApiBearerAuth,
+  ApiExcludeEndpoint,
+} from '@nestjs/swagger'
 import { InjectRedis } from '@nestjs-modules/ioredis'
 import { CombinedAuthGuard } from '../../auth/combined-auth.guard'
 import { OrganizationUserService } from '../../organization/services/organization-user.service'
 import { TunnelService } from '../services/tunnel.service'
 import { ProxyGuard } from '../guards/proxy.guard'
+import { NetworkMode } from '../enums/network-mode.enum'
+
+const INBOUND_CACHE_TTL_SECONDS = 3
+// Sentinel for "no such box", distinct from both modes.
+const INBOUND_CACHE_MISSING = 'missing'
 
 @ApiTags('preview')
 @Controller('preview')
@@ -39,10 +52,33 @@ export class PreviewController {
     return true
   }
 
+  @Get(':boxId/inbound')
+  @ApiOperation({
+    summary: 'Read the inbound mode of a box',
+    operationId: 'getBoxInboundMode',
+  })
+  @ApiParam({
+    name: 'boxId',
+    description: 'ID of the box',
+    type: 'string',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Inbound mode of the box: `enabled` means the proxy may serve its services without sign-in',
+    schema: { type: 'string', enum: Object.values(NetworkMode) },
+  })
+  @UseGuards(CombinedAuthGuard, ProxyGuard)
+  async getBoxInboundMode(@Param('boxId') boxId: string): Promise<NetworkMode> {
+    return this.cachedInboundMode(boxId)
+  }
+
+  // Replaced by `GET :boxId/inbound`; kept one release so a proxy built against
+  // the previous client keeps working through the rolling deploy.
   @Get(':boxId/public')
   @ApiOperation({
     summary: 'Check if box is public',
     operationId: 'isBoxPublic',
+    deprecated: true,
   })
   @ApiParam({
     name: 'boxId',
@@ -55,33 +91,33 @@ export class PreviewController {
     type: Boolean,
   })
   async isBoxPublic(@Param('boxId') boxId: string): Promise<boolean> {
-    const cached = await this.redis.get(`preview:public:${boxId}`)
-    if (cached) {
-      if (cached === '1') {
-        return true
-      }
+    //  a private box answers 404 like a missing one, so this cannot be used to
+    //  probe whether a box exists
+    if ((await this.cachedInboundMode(boxId)) !== NetworkMode.ENABLED) {
       throw new NotFoundException(`Box with ID ${boxId} not found`)
+    }
+    return true
+  }
+
+  // 3-second cache: the proxy asks on every preview and tunnel request. A
+  // missing box is cached too, so repeated probes do not reach the database.
+  private async cachedInboundMode(boxId: string): Promise<NetworkMode> {
+    const cacheKey = `preview:inbound:${boxId}`
+    const cached = await this.redis.get(cacheKey)
+    if (cached === INBOUND_CACHE_MISSING) {
+      throw new NotFoundException(`Box with ID ${boxId} not found`)
+    }
+    if (cached) {
+      return cached as NetworkMode
     }
 
     try {
-      const isPublic = await this.boxService.isBoxPublic(boxId)
-      //  for private boxes, throw 404 as well
-      //  to prevent using the method to check if a box exists
-      if (!isPublic) {
-        //  cache the result for 3 seconds to avoid unnecessary requests to the database
-        await this.redis.setex(`preview:public:${boxId}`, 3, '0')
-
-        throw new NotFoundException(`Box with ID ${boxId} not found`)
-      }
-      //  cache the result for 3 seconds to avoid unnecessary requests to the database
-      await this.redis.setex(`preview:public:${boxId}`, 3, '1')
-      return true
+      const mode = await this.boxService.getInboundMode(boxId)
+      await this.redis.setex(cacheKey, INBOUND_CACHE_TTL_SECONDS, mode)
+      return mode
     } catch (ex) {
       if (ex instanceof NotFoundException) {
-        //  cache the not found box as well
-        //  as it is the same case as for the private boxes
-        await this.redis.setex(`preview:public:${boxId}`, 3, '0')
-        throw ex
+        await this.redis.setex(cacheKey, INBOUND_CACHE_TTL_SECONDS, INBOUND_CACHE_MISSING)
       }
       throw ex
     }
