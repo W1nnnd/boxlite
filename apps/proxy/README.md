@@ -80,23 +80,26 @@ A host without a `<port>-` label serves only the utility routes listed in
 The HTTP path in code:
 
 ```text
-  StartProxy (— · apps/proxy/pkg/proxy/proxy.go:78) — registers the catch-all route for preview hosts
-    └─ NewProxyRequestHandler (— · apps/libs/common-go/pkg/proxy/proxy.go:113) — reverse proxy for one request
+  StartProxy (— · apps/proxy/pkg/proxy/proxy.go:80) — registers the catch-all route for preview hosts
+    └─ NewProxyRequestHandler (— · apps/libs/common-go/pkg/proxy/proxy.go:116) — reverse proxy for one request
       ├─ GetProxyTarget (Proxy · apps/proxy/pkg/proxy/get_box_target.go:49) — choose the upstream
-        ├─ parseHost (Proxy · apps/proxy/pkg/proxy/get_box_target.go:354) — canonical port plus box ID or signed token
-        ├─ getBoxPublic (Proxy · apps/proxy/pkg/proxy/get_box_target.go:245) — ask the API, cached 3 s
+        ├─ parseHost (Proxy · apps/proxy/pkg/proxy/get_box_target.go:353) — canonical port plus box ID or signed token
+        ├─ getBoxPublic (Proxy · apps/proxy/pkg/proxy/get_box_target.go:244) — ask the API, cached 3 s
         ├─ Authenticate (Proxy · apps/proxy/pkg/proxy/auth.go:18) — resolve signed hosts or authorize private/terminal access
         ├─ hasPublicTunnelAccess (Proxy · apps/proxy/pkg/proxy/tunnel_access.go:15) — check every guest service port
-        └─ updateLastActivity (Proxy · apps/proxy/pkg/proxy/get_box_target.go:425) — renew activity every 50 s
-      └─ dialGuestPort (Proxy · apps/proxy/pkg/proxy/get_box_target.go:160) — dial each new upstream connection
-        ├─ getBoxRunnerInfo (Proxy · apps/proxy/pkg/proxy/get_box_target.go:206) — runner URL and key, cached 2 min
-        └─ dialRunnerTunnel (— · apps/proxy/pkg/proxy/tunnel.go:124) — CONNECT through the runner to the guest port
+        └─ updateLastActivity (Proxy · apps/proxy/pkg/proxy/get_box_target.go:424) — renew activity every 50 s
+      └─ dialGuestPort (Proxy · apps/proxy/pkg/proxy/get_box_target.go:163) — dial each new upstream connection
+        └─ dialGuestPortWithWake (Proxy · apps/proxy/pkg/proxy/guest_wake.go:53) — dial, waking a stopped box
+          ├─ getBoxRunnerInfo (Proxy · apps/proxy/pkg/proxy/get_box_target.go:205) — runner URL and key, cached 2 min
+          ├─ dialRunnerTunnel (— · apps/proxy/pkg/proxy/tunnel.go:122) — CONNECT through the runner to the guest port
+          └─ wakeBox (Proxy · apps/proxy/pkg/proxy/guest_wake.go:94) — POST ensure-ready to the API, once per box
 ```
 
 The upstream URL `http://<box ID>:<port>` is only a routing key. `dialGuestPort` is the transport's
 `DialContext`: it resolves the box's runner and returns a tunneled connection, so HTTP connection
 pooling reuses tunnels per box and port. Raw `CONNECT` requests skip this router and go to
-`handleTunnelConnect` in [`tunnel.go`](pkg/proxy/tunnel.go).
+`handleTunnelConnect` in [`tunnel.go`](pkg/proxy/tunnel.go), which dials through the same
+`dialGuestPortWithWake`.
 
 Every new HTTP/WebSocket guest service request and raw CONNECT checks the API's public tunnel
 endpoint. It requires an unrevoked public declaration, a public box, and a box outside the
@@ -106,6 +109,30 @@ tunnel or a box made private can still admit new requests until a cached allowan
 existing connections continue until they close. If the tunnel check fails, both paths return
 502. Ports are parsed as numbers, so `022222` is still the terminal port and cannot be used
 for raw CONNECT.
+
+## Waking a stopped box
+
+A request to a declared port on a stopped box wakes it. The aim is that the first request succeeds
+when the box and its service come up within 10 seconds
+([`guest_wake.go`](pkg/proxy/guest_wake.go)):
+
+1. The proxy dials first, so a running box costs no extra API call.
+2. The runner refuses a box that is not running with `409` and code `box_not_running`. It does
+   not boot the box itself, so the API stays the only path that starts one.
+3. The proxy calls `POST /api/preview/{boxId}/ensure-ready`. The API takes the same steps as SDK
+   auto-resume: it records activity, refuses a box with auto-resume off, checks that the
+   organization is not suspended, and starts the box under its state-change lock. Concurrent
+   requests for one box share one call per proxy replica, and the API lock turns the calls from
+   all replicas into one start.
+4. A resumed box replays its `cmd`, so its service listens a few seconds after the box starts.
+   The box's network acks a tunnel only once the guest accepts it, so the runner answers `502`
+   until then, and the proxy retries the dial every 200 ms.
+5. The request is served as soon as a dial succeeds. If 10 seconds pass first, the client gets
+   `503` with `Retry-After: 3` and code `BOX_STARTING`, and the start keeps going.
+
+Only a port that passed the tunnel check reaches this path, so an undeclared port never wakes a
+box. Port 22222 does not wake a box. A port that nothing serves now fails after 10 seconds with
+`503`, not at once with `502`.
 
 ## Authentication
 
@@ -135,8 +162,12 @@ re-checks it with the API.
 | The tunnel access API is unavailable                       | `502`                                     | `502` |
 | The host has no `<port>-<id>` label                        | `404`, except the utility routes                                    | `400`                        |
 | The API still fails the visibility check after its retries | `400`                                                               | `502`                        |
-| The runner or the guest port is unreachable                | `502`                                                               | `502`                        |
+| The box is still starting, or its service does not listen, after 10 s | `503`, `Retry-After: 3`, code `BOX_STARTING`              | `503`, `Retry-After: 3`      |
+| The box is stopped and auto-resume is off                  | `503`, code `BOX_STOPPED`                                           | `503`                        |
+| The organization is suspended, or the box is in error      | `409`, code `BOX_UNAVAILABLE`                                       | `409`                        |
+| The runner is unreachable                                  | `502`, code `BAD_GATEWAY`                                           | `502`                        |
 
+Guest-dial failures on the HTTP path return the JSON error body that the proxy's other errors use.
 Port 22222 needs a credential even on a public box. SDK and CLI callers should always send one:
 without it they get the browser redirect, not a `401`.
 
@@ -183,6 +214,7 @@ is internal and changes together with the API and the runner.
 | API     | `GET /api/preview/{boxId}/public`, `/validate/{token}`, `/tunnels/{port}`; `GET /api/preview/{token}/{port}/box-id` | `PROXY_API_KEY` |
 | API     | `GET /api/preview/{boxId}/access`                                                                        | The caller's bearer token                               |
 | API     | `GET /api/runners/by-box/{boxId}`, `POST /api/box/{boxId}/last-activity`                                 | `PROXY_API_KEY`                                         |
+| API     | `POST /api/preview/{boxId}/ensure-ready`, when the runner reports the box is not running                 | `PROXY_API_KEY`                                         |
 | Runner  | `CONNECT /v1/boxes/{boxId}/network/tunnel?port={port}`; `/boxes/{boxId}/toolbox/proxy/22222/...`         | The runner's key from `by-box`, in `X-BoxLite-Authorization` |
 
 ## Configuration
@@ -227,6 +259,7 @@ runs the proxy on port 4000 with the rest of the local stack.
 - [`pkg/proxy/auth.go`](pkg/proxy/auth.go), [`pkg/proxy/auth_callback.go`](pkg/proxy/auth_callback.go):
   credentials and OIDC login
 - [`pkg/proxy/tunnel.go`](pkg/proxy/tunnel.go): CONNECT tunnels to the runner
+- [`pkg/proxy/guest_wake.go`](pkg/proxy/guest_wake.go): waking a stopped box and retrying the guest dial
 - [`pkg/proxy/warning_page.go`](pkg/proxy/warning_page.go): preview warning page
 - [`../libs/common-go/pkg/proxy/`](../libs/common-go/pkg/proxy/): shared reverse proxy and stream relay
 - Runner side: [`network_tunnel.go`](../runner/pkg/api/controllers/network_tunnel.go) and

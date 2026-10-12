@@ -1,11 +1,18 @@
-import { NotFoundException } from '@nestjs/common'
+import { ConflictException, NotFoundException } from '@nestjs/common'
 import { PreviewController } from './preview.controller'
+import { CombinedAuthGuard } from '../../auth/combined-auth.guard'
+import { ProxyGuard } from '../guards/proxy.guard'
 
 describe('PreviewController public tunnel check', () => {
   const access = jest.fn()
-  const controller = new PreviewController(null as never, null as never, null as never, {
-    isPublicAccessAllowed: access,
-  } as never)
+  const controller = new PreviewController(
+    null as never,
+    null as never,
+    null as never,
+    { isPublicAccessAllowed: access } as never,
+    null as never,
+    null as never,
+  )
 
   beforeEach(() => access.mockReset())
 
@@ -19,5 +26,66 @@ describe('PreviewController public tunnel check', () => {
     await expect(controller.isPublicTunnelActive('box-1', 3000)).rejects.toBeInstanceOf(NotFoundException)
     await expect(controller.isPublicTunnelActive('box-1', 3000)).resolves.toBe(true)
     expect(access).toHaveBeenCalledWith('box-1', 3000)
+  })
+})
+
+describe('PreviewController ensure-ready', () => {
+  const box = { id: 'box-1', organizationId: 'org-1', autoResume: true }
+  const organization = { id: 'org-1', suspended: false }
+  let calls: string[]
+  let boxService: { findOne: jest.Mock; updateLastActivityAt: jest.Mock }
+  let organizationService: { findOne: jest.Mock }
+  let autoResume: { ensureReady: jest.Mock }
+  let controller: PreviewController
+
+  beforeEach(() => {
+    calls = []
+    boxService = {
+      findOne: jest.fn().mockResolvedValue(box),
+      updateLastActivityAt: jest.fn(async () => {
+        calls.push('activity')
+      }),
+    }
+    organizationService = { findOne: jest.fn().mockResolvedValue(organization) }
+    autoResume = {
+      ensureReady: jest.fn(async () => {
+        calls.push('ensureReady')
+      }),
+    }
+    controller = new PreviewController(
+      null as never,
+      boxService as never,
+      null as never,
+      null as never,
+      organizationService as never,
+      autoResume as never,
+    )
+  })
+
+  it('is proxy-only and kept out of generated API clients', () => {
+    expect(Reflect.getMetadata('swagger/apiExcludeEndpoint', controller.ensureReady)).toEqual({ disable: true })
+    expect(Reflect.getMetadata('__guards__', controller.ensureReady)).toEqual([CombinedAuthGuard, ProxyGuard])
+  })
+
+  it('records activity, then wakes the box with the organization that owns it', async () => {
+    await controller.ensureReady('box-1')
+
+    expect(calls).toEqual(['activity', 'ensureReady'])
+    expect(organizationService.findOne).toHaveBeenCalledWith('org-1')
+    expect(autoResume.ensureReady).toHaveBeenCalledWith('box-1', organization)
+  })
+
+  it('refuses to wake a box that disabled auto-resume', async () => {
+    boxService.findOne.mockResolvedValue({ ...box, autoResume: false })
+
+    await expect(controller.ensureReady('box-1')).rejects.toBeInstanceOf(ConflictException)
+    expect(calls).toEqual(['activity'])
+  })
+
+  it('treats a box whose organization is gone as not found', async () => {
+    organizationService.findOne.mockResolvedValue(null)
+
+    await expect(controller.ensureReady('box-1')).rejects.toBeInstanceOf(NotFoundException)
+    expect(autoResume.ensureReady).not.toHaveBeenCalled()
   })
 })

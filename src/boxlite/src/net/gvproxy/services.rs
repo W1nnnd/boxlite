@@ -447,6 +447,9 @@ impl NetworkBackend for GvproxyBackend {
         // so we speak it raw (not via hyper): send gvproxy's request, read its
         // literal "OK" ack, and the socket becomes a raw pipe to the guest target.
         // Mirrors gvproxy's own `transport.Tunnel` (`POST /tunnel?ip=&port=`).
+        // The bridge acks only once the guest accepted the connection
+        // (`controlMux` in gvproxy-bridge), so a port nothing listens on fails
+        // here instead of yielding a pipe that closes at once.
         let ctl = self.control_socket_path.clone();
         let handshake = async {
             let mut stream = UnixStream::connect(&ctl).await.map_err(|e| {

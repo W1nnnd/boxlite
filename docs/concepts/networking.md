@@ -50,7 +50,9 @@ QEMU's user-mode networking stack.
 
 The box network tunnel API is portable across local and REST runtimes, but its
 transport is backend-specific. `tunnel()` eagerly prepares one local gvproxy or
-remote service-proxy connection. `uri()` inspects its public URI, while `connect()`
+remote service-proxy connection. A local tunnel is prepared only once the guest
+accepts the connection, so `tunnel()` fails while nothing in the box listens on
+the port. `uri()` inspects its public URI, while `connect()`
 or `forward()` consumes that prepared one-shot tunnel into a byte stream or listener.
 For a remote public box, preparing the tunnel registers that guest port as public.
 The proxy accepts HTTP/WebSocket previews, including signed URLs, and raw CONNECT
@@ -58,6 +60,9 @@ only when the box is public and the port has an active declaration. Getting a
 preview URL alone does not declare the port. Private boxes cannot expose guest
 service ports through previews, even with a credential. The authenticated web
 terminal uses reserved port 22222 without a tunnel declaration.
+A request to a declared port on a stopped box with auto-resume on wakes the box.
+It succeeds if the box's `cmd` serves the port within 10 seconds; otherwise the
+proxy answers `503` with `Retry-After`.
 
 Explicit host port publication is a separate local-runtime feature that owns a
 TCP listener and accepts repeated connections.

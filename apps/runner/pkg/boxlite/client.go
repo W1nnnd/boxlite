@@ -676,7 +676,7 @@ func (c *Client) getOrFetchBox(ctx context.Context, boxId string) (*boxlite.Box,
 // An unmapped handle is instead leaked for the process lifetime — Close only
 // frees what is still in the map. The cost is one handle per request that finds
 // its box down: calls that go on to boot it stop there, while ones that refuse a
-// stopped box (metrics, a guest-port dial) pay it again on every retry. That is
+// stopped box (metrics) pay it again on every retry. That is
 // affordable only because it tracks request volume — which is why GetBoxInfo
 // reads through the runtime rather than coming through here.
 // Ref-counting the wrapper is the real fix, and it belongs in the SDK.
