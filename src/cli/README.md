@@ -499,8 +499,9 @@ Restart one or more boxes.
 
 ### `boxlite update`
 
-Make an existing remote box public or private, so `boxlite network tunnel` can
-reach it. `enabled` exposes the box's services without authentication.
+Enable or disable inbound access on an existing remote box. `enabled` lets
+`boxlite network tunnel` URLs reach the box's services without sign-in;
+`disabled` makes them unreachable through the proxy, even after sign-in.
 
 **Usage:** `boxlite update BOX --inbound <enabled|disabled>`
 
@@ -536,11 +537,16 @@ Display detailed information on one or more boxes (JSON, YAML, or Go-style templ
 | `--latest` | `-l` | Inspect the most recently created box (cannot be used with BOX) |
 | `--format FMT` | `-f` | Output: `json`, `yaml`, or a Go template (e.g. `{{.State.Status}}`, `{{.Id}}`). Default: `json`. Table format is not supported. |
 
+`Network` holds both directions of the box's policy, `Outbound` and `Inbound`,
+each with `Mode` (`enabled` or `disabled`) and `AllowNet`. It is `null` when the
+runtime does not know the policy, such as a REST server that predates it.
+
 **Examples:**
 
 ```bash
 boxlite inspect mybox
 boxlite inspect -f '{{.State.Status}}' mybox
+boxlite inspect -f '{{.Network.Inbound.Mode}}' mybox
 boxlite inspect --latest -f yaml
 boxlite inspect box1 box2 -f json
 ```

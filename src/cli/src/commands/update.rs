@@ -12,8 +12,9 @@ pub struct UpdateArgs {
     #[arg(value_name = "BOX")]
     pub target: String,
 
-    /// Inbound mode: "enabled" (services the box exposes are publicly
-    /// reachable) or "disabled" (private). Remote boxes only.
+    /// Inbound mode: "enabled" (services the box exposes are reachable
+    /// through the remote proxy without sign-in) or "disabled". Remote boxes
+    /// only.
     #[arg(long = "inbound", value_name = "MODE", required = true, value_parser = parse_network_mode)]
     pub inbound: NetworkMode,
 }

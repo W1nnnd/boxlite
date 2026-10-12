@@ -464,7 +464,7 @@ impl ApiClient {
         Ok(descriptor.uri)
     }
 
-    /// Make a box's services public (`Enabled`) or private (`Disabled`).
+    /// Enable (`Enabled`) or disable (`Disabled`) inbound access to a box's services.
     pub(crate) async fn set_box_inbound(
         &self,
         box_id: impl AsRef<str>,
@@ -910,9 +910,9 @@ mod tests {
     /// Our proxy answers this handshake with a verdict of its own and states
     /// it in plain text. Each refusal must keep the class its status names and
     /// the sentence the proxy wrote: a bad target is the caller's error, a
-    /// private box is an auth failure the CLI keys on, and a runner the proxy
-    /// could not reach is an upstream failure — never an intermediary's, since
-    /// the proxy plainly answered.
+    /// box with inbound access disabled is an auth failure the CLI keys on,
+    /// and a runner the proxy could not reach is an upstream failure — never
+    /// an intermediary's, since the proxy plainly answered.
     #[tokio::test]
     #[allow(clippy::result_large_err)]
     async fn connect_box_network_tunnel_keeps_the_proxys_own_verdict() {

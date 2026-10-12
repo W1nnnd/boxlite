@@ -402,7 +402,7 @@ impl NetworkHandle {
             .map(|tunnel| tunnel.with_opener(opener))
     }
 
-    /// Make the box's services public (`Enabled`) or private (`Disabled`).
+    /// Enable (`Enabled`) or disable (`Disabled`) inbound access to the box's services.
     ///
     /// Only REST runtimes support this, and only against a server that
     /// advertises it; every other case returns `Unsupported`.

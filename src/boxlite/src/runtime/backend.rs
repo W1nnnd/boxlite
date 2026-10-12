@@ -171,7 +171,7 @@ pub(crate) trait BoxNetworkBackend: Send + Sync {
     /// Establish a one-shot tunnel to a service port inside the box.
     async fn tunnel(&self, target: SocketAddr) -> BoxliteResult<BoxTunnel>;
 
-    /// Make the box's services public (`Enabled`) or private (`Disabled`).
+    /// Enable (`Enabled`) or disable (`Disabled`) inbound access to the box's services.
     ///
     /// For now only REST runtimes implement this. The local runtime keeps
     /// the `Unsupported` default: it never enforces inbound access, and a

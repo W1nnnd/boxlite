@@ -490,7 +490,7 @@ picks at create. Prints `BOX` on success.
 
 | Flag | Description |
 |------|-------------|
-| `--inbound <enabled\|disabled>` | Required. `enabled` lets `boxlite network tunnel` reach the box; `disabled` makes it private again. |
+| `--inbound <enabled\|disabled>` | Required. `enabled` lets `boxlite network tunnel` reach the box; `disabled` turns inbound access off again. |
 
 ```bash
 boxlite --profile app update mybox --inbound enabled
@@ -565,13 +565,16 @@ The Go-template engine exposes a `json` function for serializing nested values.
 format, or `null` if the start time has not been recorded or is unavailable
 over REST. `State.LastActivityAt` is when the box was last active in RFC 3339
 format — the clock AutoStop measures idleness against — or `null` for a local
-box, which records no activity.
+box, which records no activity. `Network.Outbound` and `Network.Inbound` each
+carry `Mode` (`enabled` or `disabled`) and `AllowNet`; `Network` is `null` when
+the runtime does not know the policy, such as a REST server that predates it.
 
 **Examples:**
 
 ```bash
 boxlite inspect mybox
 boxlite inspect --format '{{.State.Status}}' mybox
+boxlite inspect --format '{{.Network.Inbound.Mode}}' mybox
 boxlite inspect --format '{{.State.StartedAt}}' mybox
 boxlite inspect --format '{{.State.LastActivityAt}}' mybox
 boxlite inspect -l --format yaml
@@ -692,8 +695,8 @@ port. The canonical bound address is printed to stdout before clients are
 accepted. Ctrl-C closes the listener and active connections. TCP hosts must be
 numeric addresses, and Unix socket paths must be absolute.
 
-A remote box must be public before it can be tunneled: create it with
-`--inbound enabled`, or make an existing box public with
+A remote box needs inbound access enabled before it can be tunneled: create it
+with `--inbound enabled`, or enable it on an existing box with
 [`boxlite update BOX --inbound enabled`](#boxlite-update).
 
 ---
@@ -852,7 +855,7 @@ Used by `run` and `create` (defined in `src/cli/src/cli.rs`).
 |------|-------------|
 | `--network <enabled\|disabled>` | Outbound mode; default `enabled`. Disabled mode creates no network interface. |
 | `--allow-net HOST` | Restrict TCP/UDP egress to exact hosts, `*.example.com`, IPs, or CIDRs; repeatable, implies enabled networking, and is incompatible with `--network disabled`. Hostname-only rules deny UDP unless an IP/CIDR is also allowed. |
-| `--inbound <enabled\|disabled>` | Inbound mode; default `disabled` (services exposed by the box are private). Change it later with [`boxlite update`](#boxlite-update). |
+| `--inbound <enabled\|disabled>` | Inbound mode; default `disabled` (services exposed by the box are unreachable from outside). Change it later with [`boxlite update`](#boxlite-update). |
 | `--net-tx-kbps KBPS` | Cap what the box sends (guest to internet), in kilobits/sec. `0` or unset leaves it uncapped. |
 | `--net-rx-kbps KBPS` | Cap what reaches the box (internet to guest), in kilobits/sec. `0` or unset leaves it uncapped. |
 

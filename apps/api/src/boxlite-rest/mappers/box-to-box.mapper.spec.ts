@@ -155,6 +155,25 @@ describe('BoxLite container process options mapper', () => {
     expect(response.exit_code).toBe(expected)
   })
 
+  // The flags are what the control-plane DTO still carries; the `/v1` read
+  // must rebuild the policy from them without flipping either polarity.
+  it.each([
+    [
+      { public: true, networkBlockAll: false, networkAllowList: 'api.openai.com, 10.0.0.0/8' },
+      'enabled',
+      'enabled',
+      ['api.openai.com', '10.0.0.0/8'],
+    ],
+    [{ public: false, networkBlockAll: true, networkAllowList: undefined }, 'disabled', 'disabled', []],
+  ])('reports the network policy %j in both directions', (flags, inbound, outbound, allowNet) => {
+    const response = boxToBoxResponse({ id: 'box-1', state: BoxState.STARTED, labels: {}, ...flags } as any)
+
+    expect(response.network).toEqual({
+      outbound: { mode: outbound, allow_net: allowNet },
+      inbound: { mode: inbound, allow_net: [] },
+    })
+  })
+
   it('omits exit_code when the box has none', () => {
     const response = boxToBoxResponse({
       id: 'box-1',
