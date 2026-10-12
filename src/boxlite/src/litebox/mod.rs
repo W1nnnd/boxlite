@@ -32,7 +32,7 @@ pub use network::{
 pub use snapshot::SnapshotHandle;
 pub use state::{BoxState, BoxStatus, HealthState, HealthStatus};
 
-pub use git::GitHandle;
+pub use git::{GitBranches, GitFileStatus, GitHandle, GitStatus};
 
 pub(crate) use box_impl::SharedBoxImpl;
 pub(crate) use init::BoxBuilder;

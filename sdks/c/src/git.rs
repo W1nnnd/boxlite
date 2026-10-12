@@ -273,6 +273,103 @@ pub unsafe extern "C" fn boxlite_git_get_config(
     }
 }
 
+/// Structured status of the repository at `path`, delivered as a JSON object
+/// string (`current_branch`, `upstream`, `ahead`, `behind`,
+/// `branch_published`, `head_commit`, `file_status[]` with `path`,
+/// `orig_path`, `index_status`, `worktree_status`). On success the callback
+/// owns the string and must release it with `boxlite_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn boxlite_git_status(
+    git: *mut CBoxGitHandle,
+    path: *const c_char,
+    cb: CGitGetConfigCb,
+    user_data: *mut c_void,
+    out_error: *mut CBoxliteError,
+) -> BoxliteErrorCode {
+    unsafe { spawn_git_json(git, path, cb, user_data, out_error, GitJsonQuery::Status) }
+}
+
+/// Local branches of the repository at `path`, delivered as a JSON object
+/// string (`current`, `names[]`). On success the callback owns the string and
+/// must release it with `boxlite_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn boxlite_git_branches(
+    git: *mut CBoxGitHandle,
+    path: *const c_char,
+    cb: CGitGetConfigCb,
+    user_data: *mut c_void,
+    out_error: *mut CBoxliteError,
+) -> BoxliteErrorCode {
+    unsafe { spawn_git_json(git, path, cb, user_data, out_error, GitJsonQuery::Branches) }
+}
+
+#[derive(Clone, Copy)]
+enum GitJsonQuery {
+    Status,
+    Branches,
+}
+
+unsafe fn spawn_git_json(
+    git: *mut CBoxGitHandle,
+    path: *const c_char,
+    cb: CGitGetConfigCb,
+    user_data: *mut c_void,
+    out_error: *mut CBoxliteError,
+    query: GitJsonQuery,
+) -> BoxliteErrorCode {
+    unsafe {
+        if git.is_null() {
+            write_error(out_error, null_pointer_error("git"));
+            return BoxliteErrorCode::InvalidArgument;
+        }
+        let path = match c_str_to_string(path) {
+            Ok(path) => path,
+            Err(error) => {
+                write_error(out_error, error);
+                return BoxliteErrorCode::InvalidArgument;
+            }
+        };
+        let cb = crate::unwrap_cb_or_return!(cb, out_error);
+
+        let git_ref = &*git;
+        let handle = git_ref.handle.clone();
+        let queue = git_ref.queue.clone();
+        let user_data = user_data as usize;
+
+        git_ref.tokio_rt.spawn(async move {
+            let json = match query {
+                GitJsonQuery::Status => handle
+                    .status(&path)
+                    .await
+                    .and_then(|v| serde_json::to_string(&v).map_err(json_error)),
+                GitJsonQuery::Branches => handle
+                    .branches(&path)
+                    .await
+                    .and_then(|v| serde_json::to_string(&v).map_err(json_error)),
+            };
+            // serde_json escapes NUL, so CString::new cannot fail here.
+            let result = json.and_then(|j| {
+                CString::new(j).map_err(|_| boxlite::BoxliteError::Internal("interior NUL".into()))
+            });
+            push_event(
+                &queue,
+                RuntimeEvent::GitGetConfig {
+                    cb,
+                    user_data,
+                    result,
+                },
+            )
+            .await;
+        });
+
+        BoxliteErrorCode::Ok
+    }
+}
+
+fn json_error(e: serde_json::Error) -> boxlite::BoxliteError {
+    boxlite::BoxliteError::Internal(format!("failed to encode git result: {e}"))
+}
+
 unsafe fn optional_c_string(value: *const c_char) -> Result<Option<String>, boxlite::BoxliteError> {
     if value.is_null() {
         return Ok(None);

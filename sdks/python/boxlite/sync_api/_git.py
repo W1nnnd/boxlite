@@ -1,6 +1,6 @@
 """SyncGitHandle - synchronous git operations for a box."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ._box import SyncBox
@@ -42,3 +42,11 @@ class SyncGitHandle:
     ) -> str:
         """Read a git config value."""
         return self._owner._sync(self._owner._box.git.get_config(key, scope, path))
+
+    def status(self, path: str) -> Any:
+        """Structured status of the repository at ``path`` (see ``GitHandle.status``)."""
+        return self._owner._sync(self._owner._box.git.status(path))
+
+    def branches(self, path: str) -> Any:
+        """Local branches of the repository at ``path`` (see ``GitHandle.branches``)."""
+        return self._owner._sync(self._owner._box.git.branches(path))

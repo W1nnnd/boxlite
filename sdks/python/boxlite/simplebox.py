@@ -61,7 +61,7 @@ class NetworkHandle:
 
 
 class GitHandle:
-    """Git config operations for a ``SimpleBox``."""
+    """Git operations for a ``SimpleBox``."""
 
     def __init__(self, box: "SimpleBox") -> None:
         self._owner = box
@@ -102,6 +102,24 @@ class GitHandle:
     ) -> str:
         """Read a git config value."""
         return await self._native().get_config(key, scope, path)
+
+    async def status(self, path: str):
+        """Structured status of the repository at ``path``.
+
+        Returns a ``GitStatus`` with ``current_branch``, ``upstream``,
+        ``ahead``, ``behind``, ``branch_published``, ``head_commit`` and a
+        ``file_status`` list of ``GitFileStatus`` entries (empty when clean).
+        Paths containing spaces or newlines are reported verbatim.
+        """
+        return await self._native().status(path)
+
+    async def branches(self, path: str):
+        """Local branches of the repository at ``path``.
+
+        Returns a ``GitBranches`` with ``current`` (``None`` when HEAD is
+        detached) and ``names``.
+        """
+        return await self._native().branches(path)
 
 
 class SimpleBox:
