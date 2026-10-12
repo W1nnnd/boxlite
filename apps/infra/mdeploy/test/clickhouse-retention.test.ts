@@ -70,12 +70,13 @@ test('ClickHouse providers preserve host inputs and reconcile optional reader cr
   const output = (value: any): any => ({ value, apply: (fn: (value: any) => any) => output(fn(value)) })
   const resources = new Map<string, { args: any; options: any }>()
   let rotated = ''
+  let arnSuffix = ''
   class Resource {
     [key: string]: any
     constructor(name: string, args: any, options: any = {}) {
       resources.set(name, { args, options })
       Object.assign(this, args, {
-        id: output(name), arn: output(`${name}-arn`), selfLink: output(name), email: output('host@example.test'),
+        id: output(name), arn: output(`${name}-arn${arnSuffix}`), selfLink: output(name), email: output('host@example.test'),
         name: output(`${name}/versions/${name === rotated ? 2 : 1}`),
         networkInterfaces: [{ networkIp: '10.0.0.2' }], result: output('test-password'),
       })
@@ -149,7 +150,7 @@ test('ClickHouse providers preserve host inputs and reconcile optional reader cr
       assert.match(rotation.script, new RegExp(`${rotated}/versions/2`))
     })
   }
-  await t.test('AWS uses a fixed secret name and managed version in readiness', () => {
+  await t.test('AWS uses unique secret names and propagates the returned ARN through IAM and readiness', () => {
     const invoke = (otelOpenapiEnabled: boolean) => {
       resources.clear()
       return awsClickHouseProvider({
@@ -160,8 +161,9 @@ test('ClickHouse providers preserve host inputs and reconcile optional reader cr
     }
     invoke(true)
     const readiness = resources.get('ClickHouseDatabaseReady')!.args
-    assert.equal(resources.get('ClickHouseOpenapiReaderSecret')!.args.name, 'boxlite-dev-clickhouse-openapi-reader')
-    assert.equal(resources.get('ClickHouseOpenapiReaderSecret')!.args.namePrefix, undefined)
+    assert.equal(resources.get('ClickHouseOpenapiReaderSecret')!.args.namePrefix, 'boxlite-dev-clickhouse-openapi-reader-')
+    assert.equal(resources.get('ClickHouseOpenapiReaderSecret')!.args.name, undefined)
+    assert.equal(resources.get('ClickHouseOpenapiReaderSecret')!.args.recoveryWindowInDays, 7)
     assert.equal(resources.get('ClickHouseReaderSecret')!.args.namePrefix, 'boxlite-dev-clickhouse-reader-')
     assert.equal(readiness.environment.CLICKHOUSE_OPENAPI_READER_SECRET_ARN.value, 'ClickHouseOpenapiReaderSecret-arn')
     const sql = Buffer.from(readiness.environment.CLICKHOUSE_OPENAPI_READER_SQL_BASE64, 'base64').toString()
@@ -172,5 +174,12 @@ test('ClickHouse providers preserve host inputs and reconcile optional reader cr
     invoke(false)
     assert.ok(!resources.has('ClickHouseOpenapiReaderSecret'))
     assert.equal(resources.get('ClickHouseDatabaseReady')!.args.environment.CLICKHOUSE_OPENAPI_READER_SECRET_ARN, undefined)
+    arnSuffix = '-replacement'
+    invoke(true)
+    assert.equal(resources.get('ClickHouseDatabaseReady')!.args.environment.CLICKHOUSE_OPENAPI_READER_SECRET_ARN.value,
+      'ClickHouseOpenapiReaderSecret-arn-replacement')
+    const allowed = JSON.parse(resources.get('ClickHouseSecretPolicy')!.args.policy.value).Statement[0].Resource
+    assert.ok(allowed.includes('ClickHouseOpenapiReaderSecret-arn-replacement'))
+    assert.ok(!allowed.includes('ClickHouseOpenapiReaderSecret-arn'))
   })
 })

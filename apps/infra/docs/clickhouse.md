@@ -55,17 +55,25 @@ npm run mstage env set -- --stage dev --digest OTEL_OPENAPI_ENABLED=true
 Add `--confirm` for protected stages. Missing, blank or `false` disables provisioning;
 only `true` enables it. Other values fail. The feature requires self-hosted `otel`.
 
-The SQL username is fixed at `otel_openapi_reader`; its secret is
-`<app>-<stage>-clickhouse-openapi-reader` on both clouds. Neither name is configurable.
-For example, `boxlite-app/dev` uses `boxlite-app-dev-clickhouse-openapi-reader`.
-GCP references it as `projects/<project>/secrets/<name>/versions/<version>`;
-AWS uses its Secrets Manager ARN. No credential or secret address belongs in mstage.
+The SQL username is fixed at `otel_openapi_reader`. Secret naming follows each
+cloud's existing `otel_reader` factory; neither the username nor naming rule is configurable.
+
+| Cloud | Secret name | Credential reference |
+| --- | --- | --- |
+| GCP | `<app>-<stage>-clickhouse-openapi-reader` | `projects/<project>/secrets/<name>/versions/<version>` |
+| AWS | `<app>-<stage>-clickhouse-openapi-reader-<generated-suffix>` | The resource's actual Secrets Manager ARN |
+
+For example, AWS uses the prefix `boxlite-app-dev-clickhouse-openapi-reader-`.
+The unique suffix avoids reusing a name still in the seven-day deletion recovery window.
+No credential or secret address belongs in mstage.
 
 Like `otel_reader`, the account uses the stack's RandomPassword, Secret and
 SecretVersion resources. Deployment state preserves the generated password on an
-unchanged redeploy; each stage has its own credential. A manually created same-name
-secret is not automatically imported or overwritten: creation fails. Do not pre-create
-it before applying. State recovery/import requires an explicit ownership plan.
+unchanged redeploy, including the AWS secret name; each stage has its own credential.
+Manually created secrets are not automatically imported or overwritten. An existing
+GCP exact-name secret blocks creation; AWS creates a separate uniquely named secret.
+Do not pre-create secrets under these names or prefixes: extra AWS matches make
+consumer discovery ambiguous. State recovery/import requires an explicit ownership plan.
 
 The GCP startup script or AWS SSM readiness command preserves the SQL user's identity
 and reapplies the [policy](../clickhouse/openapi-log-reader.sql), removing inherited
@@ -81,6 +89,9 @@ Backoffice connects over the private ClickHouse endpoint as `otel_openapi_reader
 Grant its runtime identity access to this one secret and inject the password through
 its platform's secret mechanism. Host IAM is provisioned by this stack; consumer IAM
 and application configuration are separate. Keep passwords out of URLs, code and logs.
+On AWS, resolve the actual ARN instead of treating the prefix as a complete name.
+If discovering by prefix, exclude secrets scheduled for deletion and require exactly
+one active match. Refresh consumer references and IAM when a secret is recreated.
 
 Rotate through the existing deployment engine by replacing only the account's
 RandomPassword resource, then applying the resulting SecretVersion and host changes.
@@ -93,6 +104,12 @@ same deployment state, rather than only moving a cloud version label.
 For migration from a separately managed reader, deploy this account and secret,
 verify access, then switch the consumer. Old users and external secrets require
 explicit cleanup; removing their obsolete stage keys does not delete them.
+
+If an earlier deployment used an exact AWS OpenAPI secret name, preview its replacement
+with the generated name before applying. The RandomPassword resource keeps its identity
+and inputs, preserving its state-managed value unless separately replaced. Coordinate
+the new ARN and consumer IAM/reference updates; the existing readiness step restarts
+ClickHouse. This naming migration does not alter GCP resources.
 
 Review rollout impact first: GCP startup changes replace the VM; AWS readiness
 restarts ClickHouse. The data disk is retained, but rollout can interrupt queries.

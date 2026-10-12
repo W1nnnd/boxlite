@@ -45,12 +45,10 @@ const UBUNTU_NAME = 'ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*
 
 type ManagedSecret = { resource: CloudResource; version: CloudResource }
 
-const clickHouseSecret = (resourceName: string, name: string, fixedName = false): ManagedSecret => {
+const clickHouseSecret = (resourceName: string, name: string): ManagedSecret => {
   const password = new random.RandomPassword(`${resourceName}Password`, { length: 32, special: false })
   const resource = new aws.secretsmanager.Secret(resourceName, {
-    ...(fixedName
-      ? { name: instanceFor({ app: $app.name, stage: $app.stage, artifact: name }) }
-      : { namePrefix: `${instanceFor({ app: $app.name, stage: $app.stage, artifact: name })}-` }),
+    namePrefix: `${instanceFor({ app: $app.name, stage: $app.stage, artifact: name })}-`,
     recoveryWindowInDays: 7,
   })
   const version = new aws.secretsmanager.SecretVersion(`${resourceName}Value`, {
@@ -132,7 +130,7 @@ export const awsClickHouseProvider =
     const writer = clickHouseSecret('ClickHouseWriterSecret', 'clickhouse-writer')
     const reader = clickHouseSecret('ClickHouseReaderSecret', 'clickhouse-reader')
     const openapiReader = otelOpenapiEnabled
-      ? clickHouseSecret('ClickHouseOpenapiReaderSecret', 'clickhouse-openapi-reader', true) : null
+      ? clickHouseSecret('ClickHouseOpenapiReaderSecret', 'clickhouse-openapi-reader') : null
     const logReaderSql = openapiReader ? renderClickHouseLogReaderSql() : null
 
     /*
