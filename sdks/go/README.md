@@ -149,6 +149,7 @@ The same route workflow works with local and remote runtimes:
 
 - `box.Network() (*Network, error)` returns box-scoped network operations.
 - `network.Tunnel(ctx, port) (*BoxTunnel, error)` prepares a one-shot tunnel.
+  On a local box it returns an error while nothing listens on `port`.
 - `TCPListenAddress(host, port)` and `UnixListenAddress(path)` return validated
   standard `net.Addr` values for `tunnel.Forward(ctx, addr)`. The returned
   `TunnelForwarder` has `Addr() net.Addr`, `Wait(ctx) error`, and repeatable

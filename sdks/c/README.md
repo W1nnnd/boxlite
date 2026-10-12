@@ -525,6 +525,8 @@ void boxlite_tunnel_free(CBoxTunnelHandle* tunnel);
 
 Each `CBoxTunnelHandle` is one-shot. Choose `boxlite_tunnel_connect()` or
 `boxlite_tunnel_forward()`; either consumes the prepared tunnel.
+On a local box, `boxlite_network_tunnel()` fails while nothing listens on
+`port`.
 `boxlite_tunnel_uri()` reports where a remotely served tunnel can be reached, as
 an allocated string the caller frees with `boxlite_free_string()`. It writes NULL
 for a local tunnel.

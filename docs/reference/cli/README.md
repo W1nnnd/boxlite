@@ -689,8 +689,8 @@ boxlite network tunnel mybox 3000 --listen unix:/tmp/app.sock
 
 A bare port binds `127.0.0.1`; listener port `0` asks the OS to allocate a
 port. For a local box, something in the box must already listen on
-`GUEST_PORT` when the command starts; otherwise it exits with an error. The canonical bound address is printed to stdout before clients are
-accepted. Ctrl-C closes the listener and active connections. TCP hosts must be
+`GUEST_PORT` when the command starts; otherwise it exits with an error. The
+canonical bound address is printed to stdout before clients are accepted. Ctrl-C closes the listener and active connections. TCP hosts must be
 numeric addresses, and Unix socket paths must be absolute.
 
 A remote box must be public before it can be tunneled: create it with
