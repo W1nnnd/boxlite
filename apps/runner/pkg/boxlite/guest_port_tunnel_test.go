@@ -16,7 +16,7 @@ import (
 )
 
 // A preview request to a stopped box used to boot it from inside the guest-port
-// dial, behind the control plane's back (POL-599). The dial must refuse the box
+// dial, behind the control plane's back. The dial must refuse the box
 // and leave it stopped, so the proxy wakes it through the API instead.
 func TestIntegrationDialGuestPortRefusesStoppedBoxWithoutBooting(t *testing.T) {
 	ctx := context.Background()
