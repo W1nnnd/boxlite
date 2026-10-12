@@ -127,7 +127,10 @@ impl From<GitBranches> for PyGitBranches {
 #[pymethods]
 impl PyGitBranches {
     fn __repr__(&self) -> String {
-        format!("GitBranches(current={:?}, names={:?})", self.current, self.names)
+        format!(
+            "GitBranches(current={:?}, names={:?})",
+            self.current, self.names
+        )
     }
 }
 

@@ -135,8 +135,14 @@ fn parse_status_v2(out: &str) -> BoxliteResult<GitStatus> {
                 "branch.ab" => {
                     has_upstream = true;
                     let (a, b) = val.split_once(' ').ok_or_else(|| bad("branch.ab"))?;
-                    st.ahead = a.trim_start_matches('+').parse().map_err(|_| bad("ahead"))?;
-                    st.behind = b.trim_start_matches('-').parse().map_err(|_| bad("behind"))?;
+                    st.ahead = a
+                        .trim_start_matches('+')
+                        .parse()
+                        .map_err(|_| bad("ahead"))?;
+                    st.behind = b
+                        .trim_start_matches('-')
+                        .parse()
+                        .map_err(|_| bad("behind"))?;
                 }
                 _ => {}
             }
@@ -161,7 +167,12 @@ fn parse_status_v2(out: &str) -> BoxliteResult<GitStatus> {
                 let x = xy_chars.next().ok_or_else(|| bad("XY"))?;
                 let y = xy_chars.next().ok_or_else(|| bad("XY"))?;
                 let orig_path = if kind == b'2' {
-                    Some(records.next().ok_or_else(|| bad("rename source"))?.to_string())
+                    Some(
+                        records
+                            .next()
+                            .ok_or_else(|| bad("rename source"))?
+                            .to_string(),
+                    )
                 } else {
                     None
                 };
@@ -306,7 +317,9 @@ impl GitHandle {
         failure: &str,
     ) -> BoxliteResult<String> {
         if path.is_empty() {
-            return Err(BoxliteError::InvalidArgument("path must not be empty".into()));
+            return Err(BoxliteError::InvalidArgument(
+                "path must not be empty".into(),
+            ));
         }
         // -c core.quotepath=off keeps non-ASCII names as raw UTF-8.
         let mut cmd = BoxCommand::new("git")
@@ -431,7 +444,13 @@ mod tests {
         let paths: Vec<_> = st.file_status.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
             paths,
-            ["README.md", "with space.txt", "new name", "conflict", "line\nbreak"]
+            [
+                "README.md",
+                "with space.txt",
+                "new name",
+                "conflict",
+                "line\nbreak"
+            ]
         );
         assert_eq!(st.file_status[0].worktree_status, "M");
         assert!(!st.file_status[0].is_staged());
