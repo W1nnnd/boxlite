@@ -61,8 +61,10 @@ can be consumed by `connect()` or by `forward()` to bind a local listener.
 Remote CLI users can run `boxlite network tunnel BOX PORT` to obtain the
 service URL. Inbound access is disabled unless the box was created with
 `--inbound enabled`; enable it on an existing box with
-`boxlite update BOX --inbound enabled`. `boxlite inspect BOX` and
-`box.info().network` report both directions of a remote box's policy.
+`boxlite update BOX --inbound enabled`, or with the **Inbound access** switch in
+the dashboard's box network section. `boxlite inspect BOX`,
+`box.info().network`, and the dashboard's `outbound` and `inbound` rows report
+both directions of a remote box's policy.
 
 Image `EXPOSE` declarations are metadata only and never create host listeners.
 
