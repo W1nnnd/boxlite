@@ -4,6 +4,9 @@
  */
 
 import { BoxState } from '../../box/enums/box-state.enum'
+import { Box } from '../../box/entities/box.entity'
+import { BoxDto } from '../../box/dto/box.dto'
+import { NetworkMode } from '../../box/enums/network-mode.enum'
 import { boxToBoxResponse, createBoxToCreateBox } from './box-to-box.mapper'
 
 describe('BoxLite lifecycle policy mapper', () => {
@@ -155,22 +158,20 @@ describe('BoxLite container process options mapper', () => {
     expect(response.exit_code).toBe(expected)
   })
 
-  // The flags are what the control-plane DTO still carries; the `/v1` read
-  // must rebuild the policy from them without flipping either polarity.
-  it.each([
-    [
-      { public: true, networkBlockAll: false, networkAllowList: 'api.openai.com, 10.0.0.0/8' },
-      'enabled',
-      'enabled',
-      ['api.openai.com', '10.0.0.0/8'],
-    ],
-    [{ public: false, networkBlockAll: true, networkAllowList: undefined }, 'disabled', 'disabled', []],
-  ])('reports the network policy %j in both directions', (flags, inbound, outbound, allowNet) => {
-    const response = boxToBoxResponse({ id: 'box-1', state: BoxState.STARTED, labels: {}, ...flags } as any)
+  // The `/v1` read carries the control-plane policy unchanged, from the box
+  // row through `BoxDto` to the response.
+  it('reports the network policy of the box row', () => {
+    const row = new Box('us', 'net')
+    row.id = 'box-1'
+    row.inboundMode = NetworkMode.ENABLED
+    row.outboundMode = NetworkMode.ENABLED
+    row.outboundAllowNet = ['api.openai.com']
+
+    const response = boxToBoxResponse(BoxDto.fromBox(row, 'https://proxy.invalid'))
 
     expect(response.network).toEqual({
-      outbound: { mode: outbound, allow_net: allowNet },
-      inbound: { mode: inbound, allow_net: [] },
+      outbound: { mode: 'enabled', allow_net: ['api.openai.com'] },
+      inbound: { mode: 'enabled', allow_net: [] },
     })
   })
 

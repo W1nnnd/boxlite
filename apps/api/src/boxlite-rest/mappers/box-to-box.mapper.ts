@@ -14,7 +14,6 @@ import {
 import { BoxResponseDto } from '../dto/box-response.dto'
 import { CreateBoxDto as RestCreateBoxDto } from '../dto/create-box.dto'
 import { CreateBoxDto } from '../../box/dto/create-box.dto'
-import { allowNetFromList, inboundModeFromPublic, outboundModeFromBlockAll } from '../../box/utils/network-policy.util'
 
 export function boxToBoxResponse(box: BoxDto): BoxResponseDto {
   return {
@@ -34,15 +33,7 @@ export function boxToBoxResponse(box: BoxDto): BoxResponseDto {
     // 0 is a real exit code, so this passes the value through. A falsy check
     // here would report every clean exit as "no exit code recorded".
     exit_code: box.exitCode,
-    // The control-plane DTO speaks the flag shape, so the policy is rebuilt
-    // from the flags here. The translation is lossless in both directions.
-    network: {
-      outbound: {
-        mode: outboundModeFromBlockAll(box.networkBlockAll),
-        allow_net: allowNetFromList(box.networkAllowList) ?? [],
-      },
-      inbound: { mode: inboundModeFromPublic(box.public), allow_net: [] },
-    },
+    network: box.network,
   }
 }
 

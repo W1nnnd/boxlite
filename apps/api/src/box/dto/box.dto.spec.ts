@@ -6,6 +6,7 @@
 
 import { Box } from '../entities/box.entity'
 import { BoxDto } from './box.dto'
+import { NetworkMode } from '../enums/network-mode.enum'
 
 describe('BoxDto public identity', () => {
   it('exposes a single public id without a legacy boxId alias', () => {
@@ -47,4 +48,33 @@ describe('BoxDto main command exit code', () => {
     expect(dto.exitCode).toBeUndefined()
     expect(JSON.parse(JSON.stringify(dto))).not.toHaveProperty('exitCode')
   })
+})
+
+describe('BoxDto network policy', () => {
+  function box(inboundMode: NetworkMode, outboundMode: NetworkMode, outboundAllowNet: string[] | null): Box {
+    const box = new Box('us', 'net')
+    box.id = 'box-1'
+    box.inboundMode = inboundMode
+    box.outboundMode = outboundMode
+    box.outboundAllowNet = outboundAllowNet
+    return box
+  }
+
+  // `network` reads the policy columns; the deprecated flags are computed
+  // from the same columns, so both shapes must describe one policy.
+  it.each([
+    [NetworkMode.ENABLED, NetworkMode.ENABLED, ['api.openai.com', '10.0.0.0/8'], true, false, 'api.openai.com,10.0.0.0/8'],
+    [NetworkMode.DISABLED, NetworkMode.DISABLED, null, false, true, undefined],
+  ])(
+    'reports inbound %s and outbound %s in both shapes',
+    (inbound, outbound, allowNet, isPublic, blockAll, allowList) => {
+      const dto = BoxDto.fromBox(box(inbound, outbound, allowNet), 'https://proxy.invalid')
+
+      expect(dto.network).toEqual({
+        outbound: { mode: outbound, allow_net: allowNet ?? [] },
+        inbound: { mode: inbound, allow_net: [] },
+      })
+      expect([dto.public, dto.networkBlockAll, dto.networkAllowList]).toEqual([isPublic, blockAll, allowList])
+    },
+  )
 })

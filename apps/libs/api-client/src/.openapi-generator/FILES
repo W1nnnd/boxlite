@@ -78,6 +78,7 @@ docs/CreateVolume.md
 docs/HealthApi.md
 docs/HealthControllerCheck200Response.md
 docs/HealthControllerCheck200ResponseInfoValue.md
+docs/InboundNetworkSpec.md
 docs/Job.md
 docs/JobStatus.md
 docs/JobType.md
@@ -86,6 +87,8 @@ docs/LogEntry.md
 docs/MetricDataPoint.md
 docs/MetricSeries.md
 docs/MetricsResponse.md
+docs/NetworkInfo.md
+docs/NetworkMode.md
 docs/ObjectStorageApi.md
 docs/OidcConfig.md
 docs/Organization.md
@@ -98,6 +101,7 @@ docs/OrganizationUnsuspension.md
 docs/OrganizationUser.md
 docs/OrganizationsApi.md
 docs/OtelConfig.md
+docs/OutboundNetworkSpec.md
 docs/PaginatedAuditLogs.md
 docs/PaginatedBoxes.md
 docs/PaginatedJobs.md
@@ -199,6 +203,7 @@ models/create-user.ts
 models/create-volume.ts
 models/health-controller-check200-response-info-value.ts
 models/health-controller-check200-response.ts
+models/inbound-network-spec.ts
 models/index.ts
 models/job-status.ts
 models/job-type.ts
@@ -207,6 +212,8 @@ models/log-entry.ts
 models/metric-data-point.ts
 models/metric-series.ts
 models/metrics-response.ts
+models/network-info.ts
+models/network-mode.ts
 models/oidc-config.ts
 models/organization-box-default-limited-network-egress.ts
 models/organization-invitation.ts
@@ -217,6 +224,7 @@ models/organization-unsuspension.ts
 models/organization-user.ts
 models/organization.ts
 models/otel-config.ts
+models/outbound-network-spec.ts
 models/paginated-audit-logs.ts
 models/paginated-boxes.ts
 models/paginated-jobs.ts

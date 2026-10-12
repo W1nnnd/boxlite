@@ -5,41 +5,7 @@
  */
 
 import { ApiProperty, ApiPropertyOptional, ApiSchema } from '@nestjs/swagger'
-import { NetworkMode } from '../../box/enums/network-mode.enum'
-
-@ApiSchema({ name: 'OutboundNetworkSpec' })
-export class OutboundNetworkResponseDto {
-  @ApiProperty({ description: 'Whether the guest may reach out', enum: Object.values(NetworkMode) })
-  mode: NetworkMode
-
-  @ApiProperty({
-    description: 'Outbound allowlist in force; empty means unrestricted egress',
-    type: [String],
-    example: ['api.openai.com', '10.0.0.0/8'],
-  })
-  allow_net: string[]
-}
-
-@ApiSchema({ name: 'InboundNetworkSpec' })
-export class InboundNetworkResponseDto {
-  @ApiProperty({
-    description: 'Whether exposed services are reachable through the proxy without sign-in',
-    enum: Object.values(NetworkMode),
-  })
-  mode: NetworkMode
-
-  @ApiProperty({ description: 'Reserved; no layer enforces an inbound allowlist yet', type: [String], example: [] })
-  allow_net: string[]
-}
-
-@ApiSchema({ name: 'NetworkInfo' })
-export class NetworkInfoResponseDto {
-  @ApiProperty({ type: OutboundNetworkResponseDto })
-  outbound: OutboundNetworkResponseDto
-
-  @ApiProperty({ type: InboundNetworkResponseDto })
-  inbound: InboundNetworkResponseDto
-}
+import { NetworkInfoResponseDto } from '../../box/dto/network-info.dto'
 
 @ApiSchema({ name: 'Box' })
 export class BoxResponseDto {
@@ -142,11 +108,12 @@ export class BoxResponseDto {
   })
   exit_code?: number
 
-  @ApiProperty({
+  // Optional to match openapi/box.openapi.yaml, where older servers omit it.
+  @ApiPropertyOptional({
     description: 'The effective network policy in both directions',
     type: NetworkInfoResponseDto,
   })
-  network: NetworkInfoResponseDto
+  network?: NetworkInfoResponseDto
 }
 
 @ApiSchema({ name: 'ListBoxesResponse' })
