@@ -877,26 +877,6 @@ enum BoxliteErrorCode boxlite_git_get_config(CBoxGitHandle *git,
                                              void *user_data,
                                              CBoxliteError *out_error);
 
-// Structured status of the repository at `path`, delivered as a JSON object
-// string (`current_branch`, `upstream`, `ahead`, `behind`,
-// `branch_published`, `head_commit`, `file_status[]` with `path`,
-// `orig_path`, `index_status`, `worktree_status`). On success the callback
-// owns the string and must release it with `boxlite_free_string`.
-enum BoxliteErrorCode boxlite_git_status(CBoxGitHandle *git,
-                                         const char *path,
-                                         CGitGetConfigCb cb,
-                                         void *user_data,
-                                         CBoxliteError *out_error);
-
-// Local branches of the repository at `path`, delivered as a JSON object
-// string (`current`, `names[]`). On success the callback owns the string and
-// must release it with `boxlite_free_string`.
-enum BoxliteErrorCode boxlite_git_branches(CBoxGitHandle *git,
-                                           const char *path,
-                                           CGitGetConfigCb cb,
-                                           void *user_data,
-                                           CBoxliteError *out_error);
-
 enum BoxliteErrorCode boxlite_image_pull(CBoxliteImageHandle *handle,
                                          const char *image_ref,
                                          CBoxImagePullCb cb,

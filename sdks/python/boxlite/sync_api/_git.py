@@ -44,9 +44,9 @@ class SyncGitHandle:
         return self._owner._sync(self._owner._box.git.get_config(key, scope, path))
 
     def status(self, path: str) -> Any:
-        """Structured status of the repository at ``path`` (see ``GitHandle.status``)."""
+        """Structured ``GitStatus`` of the repository at ``path``."""
         return self._owner._sync(self._owner._box.git.status(path))
 
     def branches(self, path: str) -> Any:
-        """Local branches of the repository at ``path`` (see ``GitHandle.branches``)."""
+        """``GitBranches`` of the repository at ``path``."""
         return self._owner._sync(self._owner._box.git.branches(path))

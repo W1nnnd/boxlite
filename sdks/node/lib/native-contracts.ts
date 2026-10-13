@@ -408,41 +408,7 @@ export interface JsNetworkHandle {
   tunnel(port: number): Promise<NativeBoxTunnel>;
 }
 
-/** One changed path in a git status result. */
-export interface JsGitFileStatus {
-  /** Path relative to the repository root, verbatim (spaces/newlines kept). */
-  path: string;
-  /** Source path of a rename or copy. */
-  origPath?: string | null;
-  /** Staged XY code from `git status --porcelain=v2` (`.` = unchanged, `?` = untracked). */
-  indexStatus: string;
-  /** Unstaged XY code from `git status --porcelain=v2`. */
-  worktreeStatus: string;
-  staged: boolean;
-  untracked: boolean;
-}
-
-/** Structured `git status` result. */
-export interface JsGitStatus {
-  /** Checked-out branch; null when HEAD is detached. */
-  currentBranch?: string | null;
-  upstream?: string | null;
-  ahead: number;
-  behind: number;
-  branchPublished: boolean;
-  /** HEAD commit id; null on an unborn branch. */
-  headCommit?: string | null;
-  /** Empty for a clean tree. */
-  fileStatus: JsGitFileStatus[];
-}
-
-/** Local branches of a repository. */
-export interface JsGitBranches {
-  current?: string | null;
-  names: string[];
-}
-
-/** Box-scoped git operations on the native `JsBox`. */
+/** Box-scoped git config operations on the native `JsBox`. */
 export interface JsGitHandle {
   /**
    * Set `user.name` and `user.email` for commits in this box.
@@ -474,10 +440,6 @@ export interface JsGitHandle {
     scope?: string | null,
     path?: string | null,
   ): Promise<string>;
-  /** Structured working-tree status of the repository at `path`. */
-  status(path: string): Promise<JsGitStatus>;
-  /** Local branches of the repository at `path`. */
-  branches(path: string): Promise<JsGitBranches>;
 }
 
 export type SocketAddress =

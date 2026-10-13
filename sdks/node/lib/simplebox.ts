@@ -15,9 +15,7 @@ import type {
   JsBox,
   JsBoxInfo,
   JsBoxOptions,
-  JsGitBranches,
   JsGitHandle,
-  JsGitStatus,
   JsVolumeSpec,
   NativeBoxConnection,
   NativeBoxTunnel,
@@ -371,7 +369,7 @@ export interface AdvancedBoxOptions {
   capabilities?: ContainerCapabilities;
 }
 
-/** Box-scoped git operations for a SimpleBox. */
+/** Box-scoped git config operations for a SimpleBox. */
 export class GitHandle {
   /** @internal */
   constructor(
@@ -418,22 +416,6 @@ export class GitHandle {
   ): Promise<string> {
     const box = await this.ensureBox();
     return box.git.getConfig(key, scope, path);
-  }
-
-  /**
-   * Structured status of the repository at `path`: `currentBranch`, `ahead`,
-   * `behind`, `branchPublished`, and one `fileStatus` entry per changed path
-   * (empty when clean). Paths with spaces or newlines are reported verbatim.
-   */
-  async status(path: string): Promise<JsGitStatus> {
-    const box = await this.ensureBox();
-    return box.git.status(path);
-  }
-
-  /** Local branches of the repository at `path`, plus the current one. */
-  async branches(path: string): Promise<JsGitBranches> {
-    const box = await this.ensureBox();
-    return box.git.branches(path);
   }
 }
 

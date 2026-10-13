@@ -805,20 +805,6 @@ BoxliteErrorCode boxlite_git_get_config(
     void* user_data,
     CBoxliteError* out_error
 );
-BoxliteErrorCode boxlite_git_status(
-    CBoxGitHandle* git,
-    const char* path,
-    CGitGetConfigCb cb,
-    void* user_data,
-    CBoxliteError* out_error
-);
-BoxliteErrorCode boxlite_git_branches(
-    CBoxGitHandle* git,
-    const char* path,
-    CGitGetConfigCb cb,
-    void* user_data,
-    CBoxliteError* out_error
-);
 ```
 
 `scope` is `"global"` (default), `"local"`, or `"system"`. Pass NULL for
@@ -893,13 +879,6 @@ if (request.email) {
 }
 boxlite_git_free(git);
 ```
-
-`boxlite_git_status()` and `boxlite_git_branches()` deliver a JSON object
-string through the same callback type; release it with
-`boxlite_free_string()`. Status fields: `current_branch`, `upstream`,
-`ahead`, `behind`, `branch_published`, `head_commit`, and `file_status[]`
-with `path`, `orig_path`, `index_status`, `worktree_status`. Branches
-fields: `current`, `names[]`.
 
 ---
 
