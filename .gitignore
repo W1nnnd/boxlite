@@ -81,6 +81,12 @@ yarn-error.log*
 *.pfx
 *.sig
 *.mobileprovision
+# google-github-actions/auth exports credentials into $GITHUB_WORKSPACE, which
+# is the checkout itself — there is no input to put them anywhere else. Ignoring
+# them is the upstream prerequisite, and it is also what keeps `runner:build`
+# from reading a CI checkout as dirty and refusing to stage a commit-keyed
+# artifact (`mdeploy/src/runner-build.ts`, `inspectCheckout`).
+gha-creds-*.json
 .env
 .env.*
 !/openapi/reference-server/.env.example
@@ -139,6 +145,9 @@ entitlements.plist
 
 # Local config
 CLAUDE.local.md
+.worktreeinclude
+AGENTS.local.md
+AGENTS.override.md
 Cargo.lock
 *.dylib.dSYM/
 
@@ -235,3 +244,7 @@ test-*.png
 .venv-infra/
 .venv-infra.partial.*/
 target/
+
+# Stage coordinates name somebody's cloud account, so they are per checkout.
+# The committed half is mstage.env.json; .mstage.config.example.json is the template.
+.mstage.config.json

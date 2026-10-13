@@ -10,6 +10,7 @@ import { OnboardingGuideDialog } from '@/components/OnboardingGuideDialog'
 import { CreateBoxDialog } from '@/components/Box/CreateBoxDialog'
 import { BoxTable } from '@/components/BoxTable'
 import { Plus, Search } from '@/components/ui/icon'
+
 import {
   AlertDialog,
   AlertDialogAction,
@@ -64,6 +65,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAuth } from 'react-oidc-context'
 import { generatePath, useNavigate, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
+
+// Below this many boxes the stat cards repeat the table; above it they are the summary.
+const FLEET_THRESHOLD = 10
 
 const Boxes: React.FC = () => {
   const api = useApi()
@@ -157,6 +161,8 @@ const Boxes: React.FC = () => {
     error: boxesDataError,
   } = useBoxes(queryKey, queryParams)
   const hasBoxes = (boxesData?.items.length ?? 0) > 0 || (boxesData?.total ?? 0) > 0
+  // Zero boxes and no filter narrowing the view: nothing to list, so the page
+  // leads with how boxes get made.
 
   useEffect(() => {
     if (boxesDataError) {
@@ -267,8 +273,6 @@ const Boxes: React.FC = () => {
     },
     [updateBoxInCache],
   )
-
-  // TODO(image-rewrite): template/image listing removed with the image/template subsystem.
 
   // Subscribe to Box Events
 
@@ -692,9 +696,10 @@ const Boxes: React.FC = () => {
 
     const skipOnboardingKey = `${LocalStorageKey.SkipOnboardingPrefix}${userId}`
 
+    const requestedByUrl = searchParams.get('onboarding') === '1'
     if (
       shouldAutoOpenOnboarding({
-        requestedByUrl: searchParams.get('onboarding') === '1',
+        requestedByUrl,
         dismissedInThisBrowser: getLocalStorageItem(skipOnboardingKey) === 'true',
         accountStateLoaded: apiKeysQuery.isSuccess && totalBoxesQuery.isSuccess,
         hasApiKeys: (apiKeysQuery.data?.length ?? 0) > 0,
@@ -733,15 +738,18 @@ const Boxes: React.FC = () => {
       />
       {/* header */}
       <div className="mb-[18px] flex items-end justify-between lg:mb-[22px]">
-        <h1 className="font-mono text-[22px] font-medium leading-none tracking-[-0.5px]">Boxes</h1>
+        <h1 className="font-display text-page font-semibold text-foreground">Boxes</h1>
       </div>
 
-      {/* stat cards */}
-      <div className="grid grid-cols-3 gap-2 sm:gap-3 lg:gap-[14px]">
-        <StatCard label="total boxes" value={totalBoxesDisplay} sub="all states" />
-        <StatCard label="running boxes" value={runningBoxesDisplay} sub="active now" live />
-        <StatCard label="stopped boxes" value={stoppedBoxesDisplay} sub="idle" />
-      </div>
+      {/* stat cards — a fleet instrument. With a handful of boxes the table
+          below says the same thing in fewer pixels, so they wait for a fleet. */}
+      {(totalBoxesQuery.data ?? 0) >= FLEET_THRESHOLD && (
+        <div className="grid grid-cols-3 gap-2 sm:gap-3 lg:gap-[14px]">
+          <StatCard label="total boxes" value={totalBoxesDisplay} sub="all states" />
+          <StatCard label="running boxes" value={runningBoxesDisplay} sub="active now" live />
+          <StatCard label="stopped boxes" value={stoppedBoxesDisplay} sub="idle" />
+        </div>
+      )}
 
       {/* toolbar */}
       <div className="mt-5 flex flex-col gap-3 sm:flex-row sm:items-stretch lg:mt-[26px]">
@@ -770,7 +778,7 @@ const Boxes: React.FC = () => {
             <button
               type="button"
               title="New Box"
-              className="inline-flex h-11 items-center justify-center gap-[7px] bg-primary px-[15px] text-[12.5px] font-semibold text-primary-foreground transition-opacity hover:opacity-85 sm:h-9"
+              className="inline-flex h-11 items-center justify-center gap-[7px] bg-primary px-[15px] text-body font-semibold text-primary-foreground transition-opacity hover:opacity-90 sm:h-9"
             >
               <Plus className="size-3.5" strokeWidth={2.4} />
               New Box
@@ -779,7 +787,6 @@ const Boxes: React.FC = () => {
         )}
       </div>
 
-      {/* table */}
       <div className="mt-[14px] flex min-h-0 flex-1 flex-col">
         <BoxTable
           boxIsLoading={boxIsLoading}
@@ -811,6 +818,7 @@ const Boxes: React.FC = () => {
           filters={filters}
           onFiltersChange={handleFiltersChange}
           handleRecover={handleRecover}
+          onOpenQuickstart={() => setShowOnboardingDialog(true)}
         />
       </div>
 

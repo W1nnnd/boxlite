@@ -9,16 +9,20 @@ import { InjectRepository } from '@nestjs/typeorm'
 import { Not, Repository, LessThan, In, JsonContains, FindOptionsWhere, ILike } from 'typeorm'
 import { Box } from '../entities/box.entity'
 import { persistWithGeneratedBoxName } from '../utils/box-name-generator'
+import { boxImageIsOrgOwned } from '../utils/image-ownership.util'
 import { CreateBoxDto } from '../dto/create-box.dto'
 import { BoxState } from '../enums/box-state.enum'
 import { BoxClass } from '../enums/box-class.enum'
 import { BoxDesiredState } from '../enums/box-desired-state.enum'
 import { GetRunnerParams, RunnerService } from './runner.service'
+import { BoxExitCodeService } from './box-exit-code.service'
 import { BoxError } from '../../exceptions/box-error.exception'
 import { BadRequestError } from '../../exceptions/bad-request.exception'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { BOX_WARM_POOL_UNASSIGNED_ORGANIZATION } from '../constants/box.constants'
-import { assertSupportedImage } from '../constants/curated-images.constant'
+import { ImageAdmissionService } from '../../image/services/image-admission.service'
+import { ImageResolverService } from '../../image/services/image-resolver.service'
+import { ImageRegistrarService, ReportedImage } from '../../image/services/image-registrar.service'
 import { BoxWarmPoolService } from './box-warm-pool.service'
 import { EventEmitter2, OnEvent } from '@nestjs/event-emitter'
 import { WarmPoolEvents } from '../constants/warmpool-events.constants'
@@ -48,6 +52,7 @@ import {
   DEFAULT_BOX_SORT_DIRECTION,
 } from '../dto/list-boxes-query.dto'
 import { createRangeFilter } from '../../common/utils/range-filter'
+import { BusinessEventActorKind, recordBusinessEvent } from '../../common/utils/business-event.util'
 import { LogExecution } from '../../common/decorators/log-execution.decorator'
 import { customAlphabet as customNanoid, nanoid, urlAlphabet } from 'nanoid'
 import { WithInstrumentation } from '../../common/decorators/otel.decorator'
@@ -76,15 +81,20 @@ import { Region } from '../../region/entities/region.entity'
 import { BoxActivityService } from './box-activity.service'
 import { assertWithinPerBoxLimits } from './per-box-limits'
 import { requiresFreshBox } from '../utils/warm-pool-eligibility.util'
+import { isCuratedSelector } from '../../image/utils/image-ref.util'
 import {
   AUTO_DELETE_DISABLED,
   AUTO_STOP_DISABLED,
   DEFAULT_AUTO_STOP_SECONDS,
   DEFAULT_AUTO_RESUME,
+  MIN_AUTO_STOP_SECONDS,
 } from '../constants/box-lifecycle.constants'
 
-// TODO(image-rewrite): resource defaults previously came from the removed image subsystem;
-// these mirror the Box entity column defaults until image resolution is rebuilt.
+// An image does not decide how large a box is. These once stood in for values
+// the removed image subsystem supplied, and resolution is back now without
+// them changing hands — deliberately, because the alternative is that rotating
+// an image silently resizes every box booted from it. They are the contract,
+// not a stopgap.
 const DEFAULT_BOX_CPU = 1
 const DEFAULT_BOX_MEM = 1
 const DEFAULT_BOX_DISK = 10
@@ -93,6 +103,8 @@ const TERMINAL_PREVIEW_PORT = 22222
 
 export type BoxCreationOptions = {
   maxCreatedBoxes?: number
+  // Who asked for the box, recorded on its box.create business events.
+  actorKind?: BusinessEventActorKind
 }
 
 @Injectable()
@@ -104,6 +116,7 @@ export class BoxService {
     @InjectRepository(Runner)
     private readonly runnerRepository: Repository<Runner>,
     private readonly runnerService: RunnerService,
+    private readonly boxExitCodeService: BoxExitCodeService,
     private readonly volumeService: VolumeService,
     private readonly configService: TypedConfigService,
     private readonly warmPoolService: BoxWarmPoolService,
@@ -117,6 +130,9 @@ export class BoxService {
     @InjectRepository(Job)
     private readonly jobRepository: Repository<Job>,
     private readonly jobService: JobService,
+    private readonly imageAdmissionService: ImageAdmissionService,
+    private readonly imageResolverService: ImageResolverService,
+    private readonly imageRegistrarService: ImageRegistrarService,
   ) {}
 
   protected getLockKey(id: string): string {
@@ -162,12 +178,27 @@ export class BoxService {
   }
 
   async createForWarmPool(warmPoolItem: WarmPool): Promise<Box> {
+    // The far side of `requiresFreshBox`'s image rule. A warm box is created
+    // with no organization and handed to whichever one claims it, so a pool row
+    // naming a tenant's image would put that image's contents in front of
+    // another tenant. Logged as well as thrown: a top-up arrives as an event, and
+    // the loop that fires it collects rejections with `allSettled`, so a throw
+    // alone would leave an operator with a pool that silently never fills.
+    if (!isCuratedSelector(warmPoolItem.image)) {
+      const message = `Warm pool ${warmPoolItem.id} names '${warmPoolItem.image}', which is not a curated image`
+      this.logger.error(message)
+      throw new BoxError(message)
+    }
+
     const box = new Box(warmPoolItem.target)
 
     box.organizationId = BOX_WARM_POOL_UNASSIGNED_ORGANIZATION
 
     box.class = warmPoolItem.class
     box.image = warmPoolItem.image
+    // Asserted curated a few lines up, so this is not a second opinion — it is
+    // the same one, written down before the curated set can move under it.
+    box.imageIsOrgOwned = false
     //  TODO: default user should be configurable
     box.osUser = 'boxlite'
     box.env = warmPoolItem.env || {}
@@ -194,9 +225,6 @@ export class BoxService {
     try {
       const boxClass = this.getValidatedOrDefaultClass(createBoxDto.class)
 
-      // TODO(image-rewrite): image resolution removed; boxes can no
-      // longer resolve an image at create time. Resource sizing falls back to request values
-      // (or Box entity defaults). Rebuild image resolution here.
       const cpu = createBoxDto.cpu ?? DEFAULT_BOX_CPU
       const mem = createBoxDto.memory ?? DEFAULT_BOX_MEM
       const disk = createBoxDto.disk ?? DEFAULT_BOX_DISK
@@ -204,12 +232,22 @@ export class BoxService {
       // Reject over-limit requests at the boundary (the "security option"
       // per-box ceilings) rather than persisting out-of-range values.
       assertWithinPerBoxLimits(cpu, mem, disk, organization)
-      // Restrict box creation to the supported pinned images; reject anything else
-      // at the request boundary (defaults undefined -> base image).
-      const image = assertSupportedImage(createBoxDto.image)
-      const needsFreshBox = requiresFreshBox(createBoxDto, organization)
-
       this.organizationService.assertOrganizationIsNotSuspended(organization)
+
+      // Admission decides whether this organization may boot from this image at
+      // all; it is the gate that replaced "curated images only". It runs after
+      // the suspension check, and before the resolver, so a refused image never
+      // reaches the catalog query.
+      await this.imageAdmissionService.assert(organization, createBoxDto.image)
+      // Resolution turns what the caller asked for into the ref a runner is
+      // given: the curated set answers its own selectors without a query, and
+      // anything else is looked up in this organization's catalog — pinned to
+      // the digest it first resolved to if the catalog knows it, passed through
+      // as typed if it does not, which is how an image gets pulled the first
+      // time.
+      const resolvedImage = await this.imageResolverService.resolve(organization, createBoxDto.image)
+      const image = resolvedImage.ref
+      const needsFreshBox = requiresFreshBox(createBoxDto, organization, resolvedImage)
 
       if (createBoxDto.volumes && createBoxDto.volumes.length > 0) {
         const volumeIdOrNames = createBoxDto.volumes.map((v) => v.volumeId)
@@ -249,7 +287,7 @@ export class BoxService {
           })
 
           if (warmPoolBox) {
-            return await this.assignWarmPoolBox(warmPoolBox, createBoxDto, organization, options.maxCreatedBoxes)
+            return await this.assignWarmPoolBox(warmPoolBox, createBoxDto, organization, options)
           }
         }
       }
@@ -274,14 +312,15 @@ export class BoxService {
       box.labels = createBoxDto.labels || {}
 
       box.image = image
+      // The resolver decided this, against the curated set as it stood when the
+      // caller asked. Recomputing it later answers a different question.
+      box.imageIsOrgOwned = resolvedImage.isOrgOwned
       box.cpu = cpu
       box.gpu = gpu
       box.mem = mem
       box.disk = disk
 
-      // POL-205: default private. A caller who never mentions visibility gets
-      // a box that is not reachable from the public internet, rather than
-      // silently anonymously public.
+      // POL-205: an unset public value on the internal create DTO defaults private.
       box.public = createBoxDto.public ?? false
 
       if (createBoxDto.networkBlockAll !== undefined) {
@@ -313,14 +352,28 @@ export class BoxService {
       // falling back to "cozy-otter-{boxId}" if it collides with the per-org
       // @Unique(['organizationId', 'name']) constraint. Only the insert retries:
       // the chosen runner is still fine, it was the name that collided.
-      const insertedBox = await this.persistOnAvailableRunner(box, { regions: [region.id], boxClass }, () =>
-        createBoxDto.name
+      //
+      // The cold-pull budget is spent in here, once a runner is chosen and just
+      // before the insert: it has no way to give a slot back, so a create its
+      // own input or placement refuses must not spend one. Only the box limit
+      // and a name collision, which the insert itself settles, come after it.
+      const insertedBox = await this.persistOnAvailableRunner(box, { regions: [region.id], boxClass }, async () => {
+        await this.imageAdmissionService.spendColdPullBudget(organization, resolvedImage)
+        return createBoxDto.name
           ? this.boxRepository.insert(box, options.maxCreatedBoxes)
           : persistWithGeneratedBoxName(box.id, (name) => {
               box.name = name
               return this.boxRepository.insert(box, options.maxCreatedBoxes)
-            }),
-      )
+            })
+      })
+
+      recordBusinessEvent({
+        name: 'box.create',
+        outcome: 'requested',
+        correlationId: insertedBox.id,
+        orgId: insertedBox.organizationId,
+        actorKind: options.actorKind,
+      })
 
       this.eventEmitter
         .emitAsync(BoxEvents.CREATED, new BoxCreatedEvent(insertedBox))
@@ -344,8 +397,9 @@ export class BoxService {
     warmPoolBox: Box,
     createBoxDto: CreateBoxDto,
     organization: Organization,
-    maxCreatedBoxes?: number,
+    options: BoxCreationOptions,
   ): Promise<BoxDto> {
+    const { maxCreatedBoxes } = options
     const now = new Date()
     const updateData: Partial<Box> = {
       // POL-205: same default as the fresh-box path — see the comment there.
@@ -401,6 +455,17 @@ export class BoxService {
       name: warmPoolBox.name,
       previousOrganizationId: BOX_WARM_POOL_UNASSIGNED_ORGANIZATION,
     })
+
+    // A claimed warm box is already started, so the request and its success
+    // commit together.
+    const createEvent = {
+      name: 'box.create',
+      correlationId: updatedBox.id,
+      orgId: organization.id,
+      actorKind: options.actorKind,
+    } as const
+    recordBusinessEvent({ ...createEvent, outcome: 'requested' })
+    recordBusinessEvent({ ...createEvent, outcome: 'success' })
 
     // Treat this as a newly started box
     this.eventEmitter.emit(
@@ -825,19 +890,19 @@ export class BoxService {
     return url
   }
 
+  /**
+   * Sign access to a box's listening port through the shared preview proxy.
+   * The hostname carries the guest port while clients use the proxy's public listener.
+   */
   async getSignedPortPreviewUrl(
     boxIdOrName: string,
     organizationId: string,
     port: number,
     expiresInSeconds = 60,
   ): Promise<SignedPortPreviewUrlDto> {
-    if (port < 1 || port > 65535) {
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
       throw new BadRequestError('Invalid port')
     }
-    if (port !== TERMINAL_PREVIEW_PORT) {
-      throw new BadRequestError(`Signed port preview is only supported for terminal port ${TERMINAL_PREVIEW_PORT}`)
-    }
-
     if (expiresInSeconds < 1 || expiresInSeconds > 60 * 60 * 24) {
       throw new BadRequestError('expiresInSeconds must be between 1 second and 24 hours')
     }
@@ -892,7 +957,11 @@ export class BoxService {
     await this.redis.del(lockKey)
   }
 
-  async destroy(boxIdOrName: string, organizationId?: string): Promise<Box> {
+  async destroy(
+    boxIdOrName: string,
+    organizationId: string | undefined,
+    actorKind: BusinessEventActorKind,
+  ): Promise<Box> {
     const box = await this.findOneByIdOrName(boxIdOrName, organizationId)
 
     if (box.pending) {
@@ -904,6 +973,14 @@ export class BoxService {
     const updatedBox = await this.boxRepository.updateWhere(box.id, {
       updateData,
       whereCondition: { pending: box.pending, state: box.state },
+    })
+
+    recordBusinessEvent({
+      name: 'box.delete',
+      outcome: 'requested',
+      correlationId: updatedBox.id,
+      orgId: updatedBox.organizationId,
+      actorKind,
     })
 
     this.eventEmitter.emit(BoxEvents.DESTROYED, new BoxDestroyedEvent(updatedBox))
@@ -982,7 +1059,12 @@ export class BoxService {
     return updated
   }
 
-  async stop(boxIdOrName: string, organizationId?: string, force?: boolean): Promise<Box> {
+  async stop(
+    boxIdOrName: string,
+    organizationId: string | undefined,
+    actorKind: BusinessEventActorKind,
+    force?: boolean,
+  ): Promise<Box> {
     const box = await this.findOneByIdOrName(boxIdOrName, organizationId)
 
     this.assertBoxNotErrored(box)
@@ -1007,6 +1089,14 @@ export class BoxService {
     const updatedBox = await this.boxRepository.updateWhere(box.id, {
       updateData,
       whereCondition: { pending: false, state: box.state },
+    })
+
+    recordBusinessEvent({
+      name: 'box.stop',
+      outcome: 'requested',
+      correlationId: updatedBox.id,
+      orgId: updatedBox.organizationId,
+      actorKind,
     })
 
     this.eventEmitter.emit(BoxEvents.STOPPED, new BoxStoppedEvent(updatedBox, force))
@@ -1097,17 +1187,51 @@ export class BoxService {
    * between "unknown" and "idle" decides whether a box is stopped.
    */
   async toBoxDto(box: Box): Promise<BoxDto> {
-    const [toolboxProxyUrl, lastActivityAt] = await Promise.all([
+    const [toolboxProxyUrl, lastActivityAt] = await this.resolveDtoMetadata(box)
+    return BoxDto.fromBox(box, toolboxProxyUrl, lastActivityAt)
+  }
+
+  /** The two out-of-entity values every conversion needs, read together. */
+  private async resolveDtoMetadata(box: Box): Promise<[string, Date | null]> {
+    return Promise.all([
       this.resolveToolboxProxyUrl(box.region),
       this.boxActivityService.getLastActivityAt(box.id).catch((err) => {
         this.logger.warn(`Failed to read last activity for box ${box.id}: ${err}`)
         return null
       }),
     ])
-    return BoxDto.fromBox(box, toolboxProxyUrl, lastActivityAt)
   }
 
-  /** Degrades a failed activity read to absent, as {@link toBoxDto} does. */
+  /**
+   * A box as a tenant asked to read it, with the main command's exit code.
+   *
+   * Separate from {@link toBoxDto} because the code comes from the box's
+   * runner, and that is a cross-service call. `toBoxDto` is on the event path:
+   * every `BoxEvents.STATE_UPDATED` converts through it
+   * (`NotificationService`), as does every resolution in
+   * `BoxStateWaiterService`. A box reaching STOPPED is exactly what fires
+   * those, so reading there would put a runner round trip in front of every
+   * stop notification — and make each one wait out the timeout precisely when
+   * the runner is the thing that went wrong.
+   *
+   * Only the two endpoints that answer a tenant's read use this.
+   */
+  async toBoxDtoWithExitCode(box: Box): Promise<BoxDto> {
+    const [[toolboxProxyUrl, lastActivityAt], exitCode] = await Promise.all([
+      this.resolveDtoMetadata(box),
+      this.boxExitCodeService.getExitCode(box),
+    ])
+    return BoxDto.fromBox(box, toolboxProxyUrl, lastActivityAt, exitCode)
+  }
+
+  /**
+   * Degrades a failed activity read to absent, as {@link toBoxDto} does.
+   *
+   * Exit codes are deliberately left out here. Reading one means asking the
+   * runner that owns the box, so a list would fan out to one call per box; the
+   * field is optional in the spec, so omitting it on a list is conformant. A
+   * client that needs it reads the box itself.
+   */
   async toBoxDtos(boxes: Box[]): Promise<BoxDto[]> {
     const [urlMap, activityMap] = await Promise.all([
       this.resolveToolboxProxyUrls(boxes.map((s) => s.region)),
@@ -1325,13 +1449,46 @@ export class BoxService {
 
   // used by internal services to update the state of a box to resolve domain and runner state mismatch
   // notably, when a box instance stops or errors on the runner, the domain state needs to be updated to reflect the actual state
-  async updateState(boxId: string, newState: BoxState, recoverable = false, errorReason?: string): Promise<void> {
+  async updateState(
+    boxId: string,
+    newState: BoxState,
+    recoverable = false,
+    errorReason?: string,
+    reportedImage?: ReportedImage,
+  ): Promise<void> {
     const box = await this.boxRepository.findOne({
       where: { id: boxId },
     })
 
     if (!box) {
       throw new NotFoundException(`Box with ID ${boxId} not found`)
+    }
+
+    // Before any state handling, and deliberately not inside it: this is a fact
+    // about the box's image, not a transition. The runner may well be telling
+    // us a state we already have — the control plane also learns a box is up by
+    // polling the runner — and the early returns below would drop the report.
+    //
+    // Only a report that says the box is up: a failed pull reports ERROR, and
+    // an image that never booted must not appear in the catalog as if it had.
+    // It is the report that is filtered, not the outcome — the state machine
+    // below may still refuse this transition, and a box that pulled an image
+    // and started it did so either way.
+    if (reportedImage && newState === BoxState.STARTED && box.image) {
+      try {
+        await this.imageRegistrarService.onBoxStarted(
+          box.organizationId,
+          { ref: box.image, isOrgOwned: boxImageIsOrgOwned(box), runnerId: box.runnerId },
+          reportedImage,
+        )
+      } catch (error) {
+        // A lost registration costs the next create one re-resolution, which
+        // is the documented trade; one refused for the image limit leaves the
+        // name unrecorded, so admission refuses the next create of it. Failing
+        // the state update instead would leave the control plane believing a
+        // running box is still starting.
+        this.logger.error(`Failed to register image for box ${boxId}: ${error}`)
+      }
     }
 
     if (box.state === newState) {
@@ -1429,7 +1586,7 @@ export class BoxService {
       return
     }
 
-    const destroyPromises = boxes.map((box) => this.destroy(box.id))
+    const destroyPromises = boxes.map((box) => this.destroy(box.id, undefined, 'warm_pool'))
     const results = await Promise.allSettled(destroyPromises)
 
     // Log any failed box destructions
@@ -1454,7 +1611,7 @@ export class BoxService {
 
   @OnEvent(OrganizationEvents.SUSPENDED_BOX_STOPPED)
   async handleSuspendedBoxStopped(event: OrganizationSuspendedBoxStoppedEvent) {
-    await this.stop(event.boxId).catch((error) => {
+    await this.stop(event.boxId, undefined, 'org_suspension').catch((error) => {
       //  log the error for now, but don't throw it as it will be retried
       this.logger.error(`Error stopping box from suspended organization. BoxId: ${event.boxId}: `, error)
     })
@@ -1480,11 +1637,13 @@ export class BoxService {
     if (!Number.isInteger(autoStop) || autoStop < AUTO_STOP_DISABLED) {
       throw new BadRequestError('Auto-stop interval must be a non-negative integer number of seconds')
     }
+    if (autoStop !== AUTO_STOP_DISABLED && autoStop < MIN_AUTO_STOP_SECONDS) {
+      throw new BadRequestError(
+        `Auto-stop interval must be 0 (disabled) or at least ${MIN_AUTO_STOP_SECONDS} seconds; shorter windows cannot be kept alive by proxy traffic`,
+      )
+    }
     if (!Number.isInteger(autoDelete) || autoDelete < AUTO_DELETE_DISABLED) {
       throw new BadRequestError('Auto-delete interval must be a non-negative integer number of seconds')
-    }
-    if (autoDelete > 0 && autoDelete <= autoStop) {
-      throw new BadRequestError('Auto-delete interval must be greater than auto-stop interval')
     }
 
     return { autoStop, autoDelete, autoResume }

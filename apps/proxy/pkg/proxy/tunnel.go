@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +43,25 @@ func (p *Proxy) handleTunnelConnect(writer http.ResponseWriter, request *http.Re
 		http.Error(writer, "box is not public", http.StatusForbidden)
 		return
 	}
+	allowed, err := p.hasPublicTunnelAccess(request.Context(), boxID, port)
+	if err != nil {
+		http.Error(writer, "tunnel access unavailable", http.StatusBadGateway)
+		return
+	}
+	if !allowed {
+		http.Error(writer, "tunnel not found", http.StatusNotFound)
+		return
+	}
+
+	// A CONNECT tunnel outlives any single HTTP request, so for tunnels the poll
+	// is the renewal rather than a fallback: bind its ticker to the stream, which
+	// ends when this handler returns. Renewing before the runner dial mirrors the
+	// API-side proxy, which renews ahead of its own readiness gate so a box being
+	// actively reached for is not reaped while the path to it is still coming up.
+	activityPoll := newActivityPollController()
+	defer activityPoll.stop()
+	go p.updateLastActivity(context.WithoutCancel(request.Context()), boxID, true, activityPoll.done)
+
 	runnerInfo, err := p.getBoxRunnerInfo(request.Context(), boxID)
 	if err != nil {
 		http.Error(writer, "runner unavailable", http.StatusBadGateway)
@@ -78,11 +96,10 @@ func (p *Proxy) tunnelTarget(request *http.Request) (string, uint16, error) {
 	} else if ok {
 		boxID = decoded
 	}
-	value, err := strconv.ParseUint(port, 10, 16)
-	if err != nil || value == 0 {
-		return "", 0, fmt.Errorf("invalid tunnel port")
+	if port == TERMINAL_PORT {
+		return "", 0, fmt.Errorf("terminal port is reserved")
 	}
-	return boxID, uint16(value), nil
+	return boxID, port, nil
 }
 
 func decodeTunnelBoxID(value string) (string, bool, error) {

@@ -6,7 +6,7 @@ Thank you for your interest in contributing to BoxLite!
 
 ### Prerequisites
 
-- Rust 1.75+ (stable)
+- Rust 1.88+ (stable)
 - macOS (Apple Silicon) or Linux (x86_64/ARM64) with KVM
 - Python 3.10+ (for Python SDK development)
 
@@ -25,7 +25,7 @@ make setup
 make dev:python
 ```
 
-For detailed build instructions, see [docs/guides](./docs/guides/README.md#building-from-source).
+For detailed build instructions, see [Building from source](./docs/contributing/development/building.md).
 
 ### Running Tests
 
@@ -41,6 +41,68 @@ Key test entry points:
 - `make test:all:python` - Python unit + integration suites
 - `make test:all:c` - C SDK suite via CMake/CTest
 
+### Coverage
+
+`make codecov` collects fresh Rust coverage. Codecov requires **90% coverage
+of changed lines**, with no tolerance below that target. Total project coverage
+is reported as an informational status. The local collection command checks
+test success; Codecov evaluates changed lines against the pull request's base.
+
+The Rust report combines core, shared, REST, CLI (including authentication
+integration tests), C/Node/Python native bindings, native VMM, and the
+runtime/shutdown/network tests that need no VM. Hosted runtime and C unit tests
+use the existing test-only runtime constructor; production runtime creation
+still validates the host. Linux also collects guest unit coverage. Vendored
+dependencies, standalone tests, and test scaffolding are excluded; production guest and SDK
+paths are not ignored by Codecov. SDK language wrappers, cloud apps, and shim
+subprocess execution are separate from the Rust unit report.
+
+The Test workflow also uploads Python and Node.js SDK coverage; Go SDK,
+networking bridge, and cloud runner coverage; and cloud API coverage. Each
+reporter includes unvisited production files. Codecov carries forward reports for unchanged
+components when their path-filtered jobs are skipped.
+
+| Command | Report under `target/coverage/` | Requirements |
+| --- | --- | --- |
+| `make coverage:python` | `python/coverage.xml` | Python development dependencies |
+| `make coverage:node` | `node/lcov.info` | Node.js 20+ and SDK dependencies |
+| `make coverage:go` | `go-sdk.out`, `gvproxy.out`, `runner.out` | Native runtime and Go toolchain |
+| `make coverage:api` | `api/lcov.info` | App dependencies, Postgres, Redis |
+
+On a VM-capable host, `make coverage:python:integration` and
+`make coverage:node:integration` build the native SDKs and run both unit and
+integration tests, replacing their reports with the combined results. Python
+tests marked `e2e` still require separate external services and credentials.
+
+These collectors produce fresh reports, bypassing Nx's result cache for API
+coverage. Codecov combines them to evaluate the 90% changed-line gate and report
+total coverage. A report does not establish coverage for components that
+have not been instrumented: shim subprocesses, the cloud proxy, and
+dashboard still require additional collection.
+
+```bash
+# Unit and non-VM coverage, using the same dependency stubs as CI.
+BOXLITE_DEPS_STUB=1 make codecov
+
+# Generate the same LCOV report directly while investigating gaps.
+BOXLITE_DEPS_STUB=1 make coverage:lcov
+
+# On a VM-capable host, add runtime and CLI integration coverage to it.
+# Leave BOXLITE_DEPS_STUB unset for the real runtime build and execution.
+make coverage:integration
+```
+
+LCOV is written to `target/coverage/lcov.info`; `make coverage` and
+`make coverage:integration` also write `target/coverage/html/index.html`.
+Collection starts clean for unit coverage; integration coverage appends to
+those profiles. Do not run Rust collectors concurrently in one checkout.
+Use `make coverage:report` to inspect partial Rust profiles after a test failure;
+such a report does not make the failed test run successful.
+
+The accumulation uses cargo-llvm-cov's `--no-report` followed by `report`, as
+in its [upstream CI workflow](https://github.com/taiki-e/cargo-llvm-cov/blob/main/.github/workflows/ci.yml#L448-L450).
+Threshold behavior follows [Codecov's status configuration](https://docs.codecov.com/docs/commit-status).
+
 ## How to Contribute
 
 ### Reporting Issues
@@ -52,13 +114,30 @@ Key test entry points:
 
 ### Pull Requests
 
-1. Fork the repository
+1. Fork the repository or create a branch here if you have push access
 2. Create a feature branch (`git checkout -b feature/my-feature`)
 3. Make your changes
 4. Run quality and tests (`make lint && make fmt:check && make test`)
 5. Commit with clear messages — see [Commit & PR messages](#commit--pr-messages)
 6. Open a Pull Request
-7. Sign the [BoxLite Contributor License Agreement](./docs/legal/CLA.md) when CLA Assistant asks you to do so
+7. CI converts unacknowledged PRs to draft. Read the current diff, check that **How it works** explains its mechanism or rationale and that the design doc's research matches its sources, then post the exact `/reviewed <full-head-SHA>` command from the bot comment. Only a new, unedited comment from the PR author counts. Once `Author reviewed the PR` passes, click **Ready for review**. A new commit, or editing/deleting the only acknowledgment, returns the PR to draft and requires a fresh comment. Forks use the same flow. Maintainer approval remains separate
+8. Sign the [BoxLite Contributor License Agreement](./docs/legal/CLA.md) when CLA Assistant asks you to do so
+
+### Updating agent tooling
+
+Run `./.agent-tooling/install.sh` in each worktree after a tooling upgrade to
+refresh hooks and managed guidance. Keep committed bootstrap scripts synchronized
+with the adopted release templates, `.github/pull_request_template.md` with the
+release's PR template (keeping this guide's word limits), and the
+`AGENT_TOOLING_REV` pin in `.github/workflows/author-review.yml` with a reviewed
+release revision.
+
+The 0.1.26 Claude bootstrap checks the adopted manifest version and reinstalls a
+stale project plugin when an update leaves it unchanged, preserving project
+settings. Run `/reload-plugins` afterward to activate the refreshed plugin. Since
+0.1.27, an agent's commit or push is refused while its session's plugin version
+differs from the one the repository's Git hooks run; reload or start a new session,
+then retry.
 
 ### Watching CI and PR feedback
 
@@ -96,34 +175,75 @@ Write for a reviewer skimming in ~30 seconds. Describe the change, not the proce
 **Commits** — [Conventional Commits](https://www.conventionalcommits.org):
 
 - Subject: `type(scope): summary` — imperative, ≤72 chars, no trailing period. Types: `feat` `fix` `docs` `refactor` `test` `chore` `perf` `ci` `build`.
-- Body (only when it adds value): the *why* and *what* at a high level; wrap ~72.
+- Body: the *why* — the problem, why this change solves it, alternatives rejected; wrap ~72. Squash merges here keep the PR description and drop the branch commits, so the PR body is what reaches `git log`; keep the commit body consistent with it.
 
-**PRs:**
+**PRs** — title is a Conventional-Commit subject. Use
+[`.github/pull_request_template.md`](./.github/pull_request_template.md) as a starting
+point; choose bullets, a real example, a table, a diagram, or short prose by clarity.
+Start with a `## TL;DR` of one short sentence. Explain the mechanism or rationale
+under `## How it works`; the local PR gate rejects a missing, empty, or
+placeholder-only section. Link the docs the PR adds or updates on the
+`Documentation:` line. Diagrams, source annotations, and section order are optional.
 
-- Title: a Conventional-Commit subject (same rule as above).
-- Description: fill in [`.github/pull_request_template.md`](./.github/pull_request_template.md); delete sections that don't apply.
-- **Call graph (required):** the end-to-end path the PR touches, *before* and *after* — one line per hop, `fn_name  (Type · path/file.rs:LOC)  — role`, flow shown by arrows or indent. Only the hops that change; elide the rest with `…`. Same shape as the graphs used to explain code elsewhere in this repo.
-- **Bug fixes** additionally mark the defect in the *Before* graph — `← BUG: <what goes wrong>` on the faulty hop — and link the issue with `Fixes #<n>`.
+- Link the design doc on the `Design doc:` line: a 1–3 page GitHub issue, Notion
+  page, or Linear issue, in that preference order. It includes related work and
+  lessons: sources, relevant constraints, and what the design adopts, adapts, or
+  rejects, and why. Every PR needs one, drafts included; keep it aligned with the
+  final scope. Use `Fixes #<n>` only when the PR closes that GitHub issue.
+- Keep each PR within 400 added code lines (target 100–200), including drafts,
+  following boxlite-agent-tooling, which takes precedence in case of conflicts.
+  Count source, scripts, configuration, and generated code. Exclude `*.spec.ts`,
+  `*_test.go`, files under `tests` directories, recognized documentation,
+  data/assets, and lockfiles; unclassified files count. Exclusions are file-based:
+  tests embedded in other source files still count. Estimate before coding and
+  measure against the intended base before each PR creation or update.
+  Track larger work in one issue with a checklist of slices, one coherent PR per
+  slice; open separate issues only for independently tracked work.
+- Explain the problem, how the change produces the result, and the resulting
+  behavior once. Keep the whole description within
+  **120 words**, fenced blocks included, with no paragraph over 80 words and no list
+  item over 40. Table pipes and box-drawing characters do not count as words. No walls of text.
+- Keep material risks and untested behavior visible. Link detailed evidence instead
+  of pasting logs, file inventories, or exhaustive test counts.
+- Include decisive verification as `command → observed result`. For a fix, briefly
+  report the observed failure with all production changes reverted and the pass with
+  the complete fix restored.
 
-```text
-Before
-  exec_box            (BoxHandle · src/boxlite/src/portal/exec.rs:88)
-    └─ open_console   (Jailer · src/boxlite/src/jailer/console.rs:41)  ← BUG: returns before the socket binds
-         └─ attach_stdio (Guest · src/guest/src/io.rs:12)              — never reached
+The shared hook checks the text agents post to GitHub: PR bodies, drafts included,
+and issues, comments, reviews, discussions, and release notes, whether sent through
+`gh` flags or API `body=` fields. It enforces the paragraph and list-item limits and
+requires a `## TL;DR` section of at most 39 words; it does not count the 120-word
+total. It rejects text over 8,000 characters or that it cannot inspect, and titles or
+bodies carrying private context such as conversation attribution, memory citations,
+or local home paths. Later bot additions are outside this check; the writing rules
+still apply.
 
-After
-  exec_box            (BoxHandle · src/boxlite/src/portal/exec.rs:88)
-    └─ open_console   (Jailer · src/boxlite/src/jailer/console.rs:41)  — awaits the bind future
-         └─ attach_stdio (Guest · src/guest/src/io.rs:12)
+Illustrative example; behavior and test results are hypothetical:
 
-Fixes #1042
+```markdown
+## TL;DR
+
+Reduce routine SDK CI work while retaining weekly compatibility coverage.
+
+Design doc: https://github.com/example/repo/issues/123
+
+Documentation: https://github.com/example/repo/blob/main/docs/ci.md#sdk-jobs
+
+## How it works
+
+- A PR changing both SDKs runs 11 jobs instead of 21.
+- Full platform combinations run weekly and on manual requests.
+
+## Verification
+
+Workflow checks passed. Hosted CI timing has not been measured.
 ```
 
 **Never put in a commit or PR** the process that produced the change (conversation / AI / step-by-step narrative), pasted logs or tickets, or secrets.
 
 ### Code Style
 
-Follow the [Rust Style Guide](./docs/development/rust-style.md) which includes:
+Follow the [Rust style guide](./docs/contributing/development/rust-style.md), which includes:
 
 - [Microsoft Rust Guidelines](https://microsoft.github.io/rust-guidelines)
 - BoxLite-specific patterns (async-first, centralized errors, thread-safe types)
@@ -134,26 +254,93 @@ Follow the [Rust Style Guide](./docs/development/rust-style.md) which includes:
 - `make lint` / `make lint:fix` for lint checks and safe autofix
 - Keep functions focused (single responsibility)
 - Add tests for new functionality
-- Update documentation as needed
+- Update documentation in the same pull request, in the place [Documentation](#documentation) assigns
 
 ## Project Structure
 
-```
+```text
 src/
   boxlite/        # Core runtime (Rust)
-  cli/            # CLI
-  server/         # Distributed server
-  shared/         # Shared types and protocol
-  ffi/            # FFI layer for SDKs
-  guest/          # Guest agent (runs inside VM)
+  cli/            # boxlite CLI
+  shim/           # Per-box shim process
+  guest/          # Guest agent (runs inside the VM)
+  vmm/            # BoxLite's own VMM
+  hypervisor/     # Hypervisor backends for the VMM
+  shared/         # Types and protocol shared by host, shim, and guest
   test-utils/     # Test utilities
   deps/           # Vendored C sys crates
 sdks/
   python/         # Python SDK
-  c/              # C SDK
   node/           # Node.js SDK
+  go/             # Go SDK
+  c/              # C SDK
+openapi/          # REST API contract
 examples/         # Example code
+docs/             # Documentation (see Documentation below)
+apps/             # Hosted platform: API, runner, preview proxy, dashboard, infrastructure
+scripts/          # Build, release, and test scripts
 ```
+
+## Documentation
+
+Every doc has one home, and other docs link to it instead of repeating it. Place a doc by the
+first rule that matches:
+
+1. **A dated record** — a root-cause analysis, investigation, or design study — goes in
+   [`docs/contributing/investigations/`](./docs/contributing/investigations/), whichever code it
+   covers.
+2. **One directory's code** — what it is, how to build and test it, how it works inside — goes in
+   that directory's `README.md`: `src/<crate>/`, `sdks/<lang>/`, `apps/<app>/`,
+   `examples/<name>/`. A topic too long for the README gets its own file beside it, linked from
+   the README. A README that a package registry publishes (`src/cli/`, `sdks/<lang>/`) is
+   written for that package's users first; a contributor guide too long for it goes in
+   `docs/contributing/development/`.
+3. **Several hosted-platform services** go in the [`apps/`](./apps/README.md) hub:
+   `apps/README.md` for architecture, `apps/API.md` for interfaces, `apps/SCHEMA.md` for the data
+   model, and `apps/infra/docs/` for deployment and operations.
+4. **Using BoxLite** — the runtime, CLI, and SDKs — goes in [`docs/`](./docs/README.md), by what
+   the reader needs:
+
+   | The reader needs                                    | Directory               |
+   | --------------------------------------------------- | ----------------------- |
+   | A first working box                                 | `docs/getting-started/` |
+   | Steps toward one goal                               | `docs/guides/`          |
+   | How and why BoxLite works                           | `docs/concepts/`        |
+   | Exact facts: APIs, CLI flags, configuration, errors | `docs/reference/`       |
+   | A quick answer to a common question                 | `docs/faq.md`           |
+
+5. **Working on BoxLite** across components goes in
+   [`docs/contributing/`](./docs/contributing/README.md):
+
+   | The reader needs                     | Directory                         |
+   | ------------------------------------ | --------------------------------- |
+   | How the code fits together           | `docs/contributing/architecture/` |
+   | How to build, test, and ship changes | `docs/contributing/development/`  |
+
+6. **The repository itself**: this file for the contribution process,
+   [`AGENTS.md`](./AGENTS.md) for agent rules,
+   [`.github/workflows/README.md`](./.github/workflows/README.md) for CI workflows,
+   [`SECURITY.md`](./SECURITY.md) for vulnerability reports, and
+   [`docs/legal/CLA.md`](./docs/legal/CLA.md) for the CLA, whose URL is published.
+
+Apart from dated records (rule 1), `docs/` never explains how an `apps/` service works: those
+services are deployment internals, not the portable contract
+([reference](./docs/reference/README.md#http-api-reference)).
+
+The four user-facing sections follow [uv's documentation](https://github.com/astral-sh/uv/tree/main/docs),
+and the top-level contributor section follows [Deno's](https://github.com/denoland/docs).
+
+When you add or change a doc:
+
+- Link every page from its section's `README.md`, a landing page that introduces each page in a
+  sentence.
+- Create a directory only when its second doc arrives; until then, use the closest existing one.
+- Name files in lowercase kebab-case, such as `guest-networking.md`.
+- Write headings under `docs/` in sentence case: capitalize the first word and proper nouns only.
+- Keep an experimental feature's page in the section its content belongs to, and state its
+  status, such as release candidate, in the title or the first paragraph.
+- Change a doc in the same pull request as the behavior it describes, and delete docs for behavior
+  that no longer exists.
 
 ## License
 

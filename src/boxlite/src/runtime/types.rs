@@ -343,11 +343,22 @@ pub struct OutboundNetworkInfo {
 /// Records whether the guest's exposed ports/preview are publicly reachable.
 /// `allow_net` is always empty today — an inbound allowlist is not yet
 /// enforced by any layer.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboundNetworkInfo {
     pub mode: NetworkMode,
     #[serde(default)]
     pub allow_net: Vec<String>,
+}
+
+/// Metadata that omits inbound reads as private, matching the inbound
+/// default of [`BoxOptions`](crate::runtime::options::BoxOptions).
+impl Default for InboundNetworkInfo {
+    fn default() -> Self {
+        Self {
+            mode: NetworkMode::Disabled,
+            allow_net: Vec::new(),
+        }
+    }
 }
 
 /// Public network metadata for a box.
@@ -488,8 +499,11 @@ pub struct BoxInfo {
     /// Health status.
     pub health_status: HealthStatus,
 
-    /// Exit code of the container's init process, when the box stopped
-    /// because its main command exited (docker semantics).
+    /// How the container's init process ended, once the runtime recorded it
+    /// (docker semantics). Stopping a box signals that process, so this
+    /// carries what the stop produced as well as a self-chosen exit: the
+    /// process's own code when it handles `SIGTERM`, and `128 + n` when a
+    /// signal ends it.
     pub exit_code: Option<i32>,
 
     /// When the box most recently entered [`BoxStatus::Running`] (docker's
@@ -515,6 +529,15 @@ pub struct BoxInfo {
     /// from an older producer readable.
     #[serde(default)]
     pub last_activity_at: Option<DateTime<Utc>>,
+    /// What `image` resolved to when this box's disk was built — the build the
+    /// box actually runs, where `image` is the reference as given. `None` for a
+    /// box booted from a local rootfs path, for one imported from an archive,
+    /// for one whose disk predates the record, and from a backend that does not
+    /// know it.
+    ///
+    /// Serde default keeps metadata from an older producer readable.
+    #[serde(default)]
+    pub resolved_image: Option<crate::images::ResolvedImage>,
 }
 
 impl BoxInfo {
@@ -561,6 +584,7 @@ impl BoxInfo {
             started_at: state.started_at,
             // Activity is recorded by the control plane, not by a local box.
             last_activity_at: None,
+            resolved_image: state.resolved_image.clone(),
         }
     }
 }
@@ -580,6 +604,7 @@ impl PartialEq for BoxInfo {
             && self.auto_delete == other.auto_delete
             && self.auto_resume == other.auto_resume
             && self.health_status == other.health_status
+            && self.resolved_image == other.resolved_image
     }
 }
 
@@ -602,7 +627,8 @@ pub struct BoxStateInfo {
     /// Process ID of the VMM subprocess (None if not running).
     pub pid: Option<u32>,
 
-    /// Init exit code, when the box stopped because its command exited.
+    /// How init ended, once the runtime recorded it — its own code, or
+    /// `128 + n` when a signal ended it, as stopping a box does.
     pub exit_code: Option<i32>,
 }
 
@@ -694,8 +720,9 @@ mod tests {
             network.outbound.allow_net,
             vec!["api.example.com".to_string()]
         );
-        // The direction the pre-split shape could not express takes its default.
-        assert_eq!(network.inbound, InboundNetworkInfo::default());
+        // The direction the pre-split shape could not express reads as private.
+        assert_eq!(network.inbound.mode, NetworkMode::Disabled);
+        assert!(network.inbound.allow_net.is_empty());
         // And the deprecated mirrors follow outbound.
         assert_eq!(network.mode, NetworkMode::Disabled);
         assert_eq!(network.allow_net, vec!["api.example.com".to_string()]);
@@ -821,6 +848,36 @@ mod tests {
         );
     }
 
+    /// `info()` and `list_info()` both build through `BoxInfo::new`, so this is
+    /// the one place the record reaches either of them.
+    #[test]
+    fn box_info_reports_what_the_disk_was_built_from() {
+        let config = BoxConfig {
+            id: BoxID::parse("01HJK4TNRPQSXYZ8WM6NCVT9R5").unwrap(),
+            name: None,
+            created_at: Utc::now(),
+            container: ContainerRuntimeConfig {
+                id: ContainerID::new(),
+            },
+            options: BoxOptions::default(),
+            engine_kind: crate::vmm::VmmKind::Libkrun,
+            box_home: PathBuf::from("/tmp/box"),
+        };
+        let mut state = BoxState::new();
+        state.resolved_image = Some(crate::images::ResolvedImage {
+            manifest_digest:
+                "sha256:0a7ed0d449b9318548e66674610d757de19b7645759f74b587b610b59d6b43fd"
+                    .to_string(),
+            total_layer_size: 3_974_501,
+        });
+
+        assert_eq!(
+            BoxInfo::new(&config, &state).resolved_image,
+            state.resolved_image
+        );
+        assert_eq!(BoxInfo::new(&config, &BoxState::new()).resolved_image, None);
+    }
+
     #[test]
     fn box_info_reports_network_configuration_and_resolved_empty_publications() {
         let config = BoxConfig {
@@ -853,13 +910,13 @@ mod tests {
         );
         assert_eq!(
             network.inbound.mode,
-            crate::runtime::options::NetworkMode::Enabled
+            crate::runtime::options::NetworkMode::Disabled
         );
         assert_eq!(network.published_ports, Some(Vec::new()));
 
         let serialized = serde_json::to_value(&info).unwrap();
         assert_eq!(serialized["network"]["outbound"]["mode"], "enabled");
-        assert_eq!(serialized["network"]["inbound"]["mode"], "enabled");
+        assert_eq!(serialized["network"]["inbound"]["mode"], "disabled");
         assert_eq!(
             serialized["network"]["published_ports"],
             serde_json::json!([])

@@ -336,7 +336,7 @@ async def require_auth(
 
 
 def box_info_to_dict(info) -> dict:
-    return {
+    box = {
         "box_id": info.id,
         "name": info.name,
         "status": info.state.status,
@@ -348,6 +348,11 @@ def box_info_to_dict(info) -> dict:
         "memory_mib": info.memory_mib,
         "labels": {},
     }
+    # Absent, not null, when nothing was recorded: 0 is a real exit code, so
+    # the field's presence is what says the main command has exited.
+    if info.state.exit_code is not None:
+        box["exit_code"] = info.state.exit_code
+    return box
 
 
 def build_box_options(req: CreateBoxRequest) -> boxlite.BoxOptions:
@@ -996,9 +1001,17 @@ async def upload_files(
         with tarfile.open(tar_path, "r:*") as tar:
             tar.extractall(extract_dir)
 
+        # Land what the archive held, not the extraction directory: its
+        # contents ("/." is docker cp's spelling for them), or a lone file by
+        # itself so that it still lands *as* `path`.
+        entries = os.listdir(extract_dir)
+        if len(entries) == 1 and os.path.isfile(os.path.join(extract_dir, entries[0])):
+            source = os.path.join(extract_dir, entries[0])
+        else:
+            source = extract_dir + "/."
         await box_handle.copy_in(
-            extract_dir, path,
-            boxlite.CopyOptions(overwrite=overwrite, include_parent=False),
+            source, path,
+            boxlite.CopyOptions(overwrite=overwrite),
         )
 
     return Response(status_code=204)

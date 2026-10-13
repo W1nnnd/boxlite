@@ -1,4 +1,4 @@
-# BoxLite CLI Reference
+# BoxLite CLI reference
 
 Exhaustive reference for the `boxlite` command-line interface — every subcommand, every flag, every exit code.
 
@@ -6,7 +6,7 @@ Exhaustive reference for the `boxlite` command-line interface — every subcomma
 
 For a quick start, see [`src/cli/README.md`](../../../src/cli/README.md).
 
-## Table of Contents
+## Table of contents
 
 - [Synopsis](#synopsis)
 - [Installation & Verification](#installation--verification)
@@ -57,7 +57,7 @@ boxlite [GLOBAL OPTIONS] <COMMAND> [ARGS...]
 
 ---
 
-## Installation & Verification
+## Installation & verification
 
 The `boxlite` CLI can be installed three ways:
 
@@ -117,7 +117,7 @@ sh ./install.sh
 
 ---
 
-## Global Options
+## Global options
 
 Place these options before the top-level command or after the complete command
 path. A parent command accepts only options shared by all children; for example,
@@ -145,7 +145,7 @@ and `--version` display actions remain terminal.
 
 ---
 
-## Environment Variables
+## Environment variables
 
 | Variable | Read by | Description |
 |----------|---------|-------------|
@@ -285,7 +285,7 @@ Logged in as:    dev@acme.test
 Name:            Dev McAcme
 Principal:       auth0|abc123 (user)
 Path prefix:     acme
-Server:          https://api.boxlite.ai/api
+Server:          https://api.boxlite.ai
 Scopes:          box:read, box:write, box:exec
 ```
 
@@ -553,6 +553,8 @@ boxlite inspect -l --format yaml
 **Synopsis:** `boxlite cp [OPTIONS] SRC DST`
 
 Copy files/folders between host and box. Exactly one of `SRC` or `DST` must be a `BOX:PATH` reference.
+End a directory `SRC` with `/.` to copy its contents rather than the directory itself, as
+`docker cp` does.
 
 **Options:**
 
@@ -560,7 +562,6 @@ Copy files/folders between host and box. Exactly one of `SRC` or `DST` must be a
 |------|---------|-------------|
 | `--follow-symlinks` | `false` | Resolve symlink targets (embedded local runtime only) |
 | `--no-overwrite` | `false` | Refuse to overwrite destination files (embedded local runtime only) |
-| `--no-include-parent` | `false` | Copy directory contents without their parent (embedded local runtime only) |
 
 If a stopped box is safe to resume, it is started temporarily and restored to
 stopped state after the copy succeeds or fails. A job box whose start would run
@@ -587,6 +588,7 @@ owned by the box's exec user.
 boxlite cp ./script.py mybox:/work/script.py        # host -> box
 boxlite cp mybox:/var/log/app.log ./app.log         # box -> host
 boxlite cp --no-overwrite ./data/ mybox:/data/      # local runtime only
+boxlite cp ./dist/. mybox:/srv/www                  # the contents of ./dist
 ```
 
 ---
@@ -674,7 +676,7 @@ Run a long-running REST API server. The server holds a single `BoxliteRuntime` a
 | `--debug` | `false` | Enable debug output |
 | `--port N` | `8100` | TCP port to listen on |
 | `--home PATH` | `~/.boxlite` | Absolute runtime data directory; env `BOXLITE_HOME` |
-| `--host ADDR` | `0.0.0.0` | Bind address |
+| `--host ADDR` | `127.0.0.1` | Bind address. Any non-loopback address (e.g. `0.0.0.0`) requires `--api-key`; `serve` refuses to start otherwise. |
 | `--api-key KEY` | unset | Require this exact `Authorization: Bearer` value (constant-time match) on every route except `GET /v1/config`; env `BOXLITE_SERVE_API_KEY`. Unset is permissive. |
 | `--registry REGISTRY` | none | Image registry; repeatable and prepended to config |
 | `--config PATH` | none | JSON runtime configuration file |
@@ -683,8 +685,8 @@ Run a long-running REST API server. The server holds a single `BoxliteRuntime` a
 
 ```bash
 boxlite serve
-boxlite serve --host 127.0.0.1 --port 9000
-BOXLITE_SERVE_API_KEY="$KEY" boxlite serve --host 127.0.0.1
+boxlite serve --port 9000
+BOXLITE_SERVE_API_KEY="$KEY" boxlite serve --host 0.0.0.0
 ```
 
 ---
@@ -743,7 +745,7 @@ boxlite completion fish > ~/.config/fish/completions/boxlite.fish
 
 ---
 
-## Shared Flag Groups
+## Shared flag groups
 
 Several commands flatten shared `clap` `Args` structs. Each is documented here once.
 
@@ -815,7 +817,7 @@ Used by `run` and `create` (defined in `src/cli/src/cli.rs`).
 |------|-------------|
 | `--network <enabled\|disabled>` | Outbound mode; default `enabled`. Disabled mode creates no network interface. |
 | `--allow-net HOST` | Restrict TCP/UDP egress to exact hosts, `*.example.com`, IPs, or CIDRs; repeatable, implies enabled networking, and is incompatible with `--network disabled`. Hostname-only rules deny UDP unless an IP/CIDR is also allowed. |
-| `--inbound <enabled\|disabled>` | Inbound mode; default `enabled` (services exposed by the box are reachable). |
+| `--inbound <enabled\|disabled>` | Inbound mode; default `disabled` (services exposed by the box are private). |
 | `--net-tx-kbps KBPS` | Cap what the box sends (guest to internet), in kilobits/sec. `0` or unset leaves it uncapped. |
 | `--net-rx-kbps KBPS` | Cap what reaches the box (internet to guest), in kilobits/sec. `0` or unset leaves it uncapped. |
 
@@ -853,7 +855,7 @@ does not expose remove-on-stop.
 
 ---
 
-## Volume Mount Syntax
+## Volume mount syntax
 
 `-v`/`--volume` accepts the grammar implemented in `src/cli/src/volumespec.rs`:
 
@@ -905,7 +907,7 @@ The anonymous-volume base directory is resolved as: `--home`, else `$BOXLITE_HOM
 
 ---
 
-## Port Publish Syntax
+## Port publish syntax
 
 `-p`/`--publish` accepts the grammar implemented at
 `src/cli/src/cli.rs`:
@@ -929,7 +931,7 @@ Image `EXPOSE` declarations remain metadata and do not open host listeners.
 
 ---
 
-## Output Formats
+## Output formats
 
 The `--format` flag is shared across `list`, `images`, `inspect`, `stats`,
 `info`, `volume ls`, and `volume get`. Valid values come from
@@ -950,7 +952,7 @@ Defaults:
 
 ---
 
-## Configuration File
+## Configuration file
 
 `--config PATH` accepts a JSON file deserialized into `BoxliteOptions`. The primary field is `image_registries`; CLI flags like `--home` and `--registry` are layered on top after loading.
 
@@ -978,7 +980,7 @@ For a richer treatment of the registry config (auth flows, fallbacks, mirrors), 
 
 ---
 
-## Exit Codes
+## Exit codes
 
 `boxlite` follows POSIX shell exit-code conventions. The mapping lives at `src/cli/src/util/mod.rs:11-15`.
 
@@ -994,7 +996,7 @@ For a richer treatment of the registry config (auth flows, fallbacks, mirrors), 
 
 ---
 
-## See Also
+## See also
 
 - [`src/cli/README.md`](../../../src/cli/README.md) — quick start, install alternatives, common workflows
 - [`docs/reference/README.md`](../README.md) — reference index (SDKs + CLI)

@@ -21,7 +21,7 @@ export class CreateBoxDto {
 
   @ApiPropertyOptional({
     description:
-      'Image to boot the box from: a supported image name (e.g. "base") or its full OCI ref. Omit for the default.',
+      'Image to boot the box from: a curated image name (e.g. "base"), or any OCI ref on an allowed public registry. Omit for the default.',
     example: 'base',
   })
   @IsOptional()
@@ -173,7 +173,7 @@ export class CreateBoxDto {
   disk?: number
 
   @ApiPropertyOptional({
-    description: 'Auto-stop interval in seconds (0 means disabled)',
+    description: 'Auto-stop interval in seconds (0 means disabled, otherwise at least 60)',
     example: 900,
     type: 'integer',
   })
@@ -210,7 +210,7 @@ export class CreateBoxDto {
   volumes?: BoxVolume[]
 
   @ApiPropertyOptional({
-    description: 'Secret placeholder rules for outbound HTTP(S) requests',
+    description: 'Secret placeholder rules for outbound HTTPS requests',
     type: [BoxSecret],
     required: false,
   })

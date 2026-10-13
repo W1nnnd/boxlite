@@ -1,6 +1,6 @@
 # Run VM-based E2E integration tests on a persistent AWS EC2 runner.
 #
-# GitHub-hosted runners do not support nested virtualization / KVM.
+# Full-runtime tests use persistent KVM capacity and cached native builds.
 # This workflow starts a pre-configured EC2 instance, runs integration tests,
 # then stops it. The instance is never terminated — build caches persist.
 #
@@ -30,7 +30,7 @@
 # the runner itself (see scripts/ci/setup-ci-runner.sh).
 #
 # Setup:   ./scripts/ci/setup-ci-runner.sh
-# Runbook: docs/ci/e2e-local.md
+# Runbook: docs/contributing/development/e2e-local.md
 name: E2E local
 
 on:
@@ -48,6 +48,7 @@ on:
       - 'Cargo.lock'
       - '.gitmodules'
       - '.github/workflows/e2e-local.yml'
+      - '!**/*.md'
   pull_request_target:
     types: [labeled, synchronize]
     branches: [main]
@@ -62,6 +63,7 @@ on:
       - '**/Cargo.toml'
       - 'Cargo.lock'
       - '.gitmodules'
+      - '!**/*.md'
   workflow_dispatch:
     inputs:
       debug:

@@ -884,7 +884,7 @@ impl BoxImpl {
             temp_tar.to_path_buf(),
             boxlite_shared::tar::PackContext {
                 follow_symlinks: opts.follow_symlinks,
-                include_parent: opts.include_parent,
+                include_parent: !boxlite_shared::tar::specifies_current_dir(host_src.as_os_str()),
             },
         )
         .await?;
@@ -956,7 +956,6 @@ impl BoxImpl {
             .download_tar(
                 container_src,
                 Some(self.container_id()),
-                opts.include_parent,
                 opts.follow_symlinks,
                 &temp_tar,
             )
@@ -1060,18 +1059,43 @@ impl BoxImpl {
         let live = self.live_state().await?;
         let mut files_iface = live.guest_session.files().await?;
         files_iface
-            .download_stream(
-                &container_src,
-                Some(&cid),
-                opts.include_parent,
-                opts.follow_symlinks,
-            )
+            .download_stream(&container_src, Some(&cid), opts.follow_symlinks)
             .await
     }
 
     // ========================================================================
     // LIVE STATE INITIALIZATION (internal)
     // ========================================================================
+
+    /// Acquire the SSH session without implicitly rerunning an explicit main command.
+    pub(crate) async fn ssh_session(&self) -> BoxliteResult<GuestSession> {
+        self.ensure_usable_without_rerunning_main("control SSH on")?;
+        Ok(self.live_state().await?.guest_session.clone())
+    }
+
+    /// Observe the current VM without booting it or starting its main command.
+    pub(crate) fn existing_ssh_session(&self) -> BoxliteResult<Option<GuestSession>> {
+        match self.state.read().status {
+            BoxStatus::Running => Ok(Some(
+                self.live
+                    .get()
+                    .map(|live| live.guest_session.clone())
+                    // Recovered handles have a transport but no cached LiveState.
+                    .unwrap_or_else(|| GuestSession::new(self.config.transport())),
+            )),
+            BoxStatus::Configured | BoxStatus::Stopped if self.live.initialized() => {
+                Err(BoxliteError::Stopped(format!(
+                    "Box {} SSH handle still holds a stopped VM; drop it and call runtime.get()",
+                    self.config.id
+                )))
+            }
+            BoxStatus::Configured | BoxStatus::Stopped => Ok(None),
+            status => Err(BoxliteError::InvalidState(format!(
+                "Cannot control SSH on box {}: it is {}",
+                self.config.id, status
+            ))),
+        }
+    }
 
     /// The implicit-boot funnel: boot the box and make sure its container's init
     /// is running. `exec`, `metrics`, `copy_into` and `copy_out` pass through
@@ -1224,7 +1248,11 @@ impl BoxImpl {
         // operations succeed. If any operation fails, the guard's Drop will
         // cleanup the VM process and directory.
         let builder = BoxBuilder::new(Arc::clone(&self.runtime), self.config.clone(), state)?;
-        let (live_state, mut cleanup_guard) = builder.build().await?;
+        let crate::litebox::init::BuiltBox {
+            live: live_state,
+            guard: mut cleanup_guard,
+            resolved_image,
+        } = builder.build().await?;
 
         // The box is up. If we adopted one whose init was already running, that
         // init needs no `Container.Start`; recording it now keeps
@@ -1280,6 +1308,8 @@ impl BoxImpl {
             // clears ExitCode on start too). The guest drops its matching
             // exit file in Container.Init.
             state.exit_code = None;
+
+            state.record_resolved_image(resolved_image);
 
             // Initialize health status if health check is configured
             if self.config.options.advanced.health_check.is_some() {
@@ -2054,7 +2084,7 @@ mod tests {
     #[tokio::test]
     async fn test_stop_recovered_box_kills_orphan_process() {
         let temp_dir = TempDir::new_in("/tmp").expect("create temp dir");
-        let runtime = RuntimeImpl::new(BoxliteOptions {
+        let runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
         })
@@ -2225,7 +2255,7 @@ mod tests {
     #[tokio::test]
     async fn get_info_without_live_state_does_not_touch_running_shim() {
         let temp_dir = TempDir::new_in("/tmp").expect("create temp dir");
-        let mut runtime = RuntimeImpl::new(BoxliteOptions {
+        let mut runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
         })
@@ -2276,7 +2306,7 @@ mod tests {
     #[tokio::test]
     async fn info_reports_live_ports_for_the_current_shim_only() {
         let temp_dir = TempDir::new_in("/tmp").expect("create temp dir");
-        let runtime = RuntimeImpl::new(BoxliteOptions {
+        let runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
         })
@@ -2361,7 +2391,7 @@ mod tests {
     #[tokio::test]
     async fn box_watcher_records_stopped_with_exit_code_when_the_shim_dies() {
         let temp_dir = TempDir::new_in("/tmp").expect("create temp dir");
-        let runtime = RuntimeImpl::new(BoxliteOptions {
+        let runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
         })
@@ -2404,7 +2434,7 @@ mod tests {
     #[tokio::test]
     async fn box_watcher_removes_the_box_after_its_shim_dies() {
         let temp_dir = TempDir::new_in("/tmp").expect("create temp dir");
-        let runtime = RuntimeImpl::new(BoxliteOptions {
+        let runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
         })
@@ -2429,3 +2459,7 @@ mod tests {
         drop((litebox, child));
     }
 }
+
+#[cfg(test)]
+#[path = "ssh_tests.rs"]
+mod ssh_tests;

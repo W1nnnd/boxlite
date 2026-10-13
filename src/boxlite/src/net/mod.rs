@@ -60,11 +60,12 @@ pub enum NetworkBackendEndpoint {
 pub struct NetworkBackendConfig {
     /// Unix socket path for the network backend (`net.sock`).
     pub socket_path: PathBuf,
-    /// Network allowlist. When non-empty, DNS sinkhole blocks unlisted hosts.
+    /// Network allowlist. When non-empty, the gateway allows only listed
+    /// destinations and dials hostname rules by name. DNS is not filtered.
     pub allow_net: Vec<String>,
     /// Secrets for MITM proxy injection.
     pub secrets: Vec<crate::runtime::options::Secret>,
-    /// Directory in which to mint the ephemeral MITM CA — used only when
+    /// Directory holding the persisted per-box MITM CA — used only when
     /// `secrets` is non-empty. The backend mints the CA in [`NetworkBackend::spec`].
     pub ca_dir: PathBuf,
     /// Per-direction rate limit for the guest link. Default is unlimited.
@@ -82,7 +83,8 @@ pub struct NetworkBackendConfig {
 pub struct NetworkBackendSpec {
     /// Unix socket path for the network backend.
     pub socket_path: PathBuf,
-    /// Network allowlist. When non-empty, DNS sinkhole blocks unlisted hosts.
+    /// Network allowlist. When non-empty, the gateway allows only listed
+    /// destinations and dials hostname rules by name. DNS is not filtered.
     #[serde(default)]
     pub allow_net: Vec<String>,
     /// Secrets for MITM proxy injection. Passed through to gvproxy.
@@ -375,6 +377,10 @@ fn control_unsupported(op: &str) -> BoxliteError {
 /// runtime control inherit the default `Unsupported` implementations. Owned
 /// per-box by the core (see `BoxImpl::network`); provisioning the VM's NIC is a
 /// separate, non-trait concern.
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates a must-use boxed future"
+)]
 #[async_trait]
 pub trait NetworkBackend: Send + Sync + std::fmt::Debug {
     /// A human-readable name for this backend (e.g. `"gvisor-tap-vsock"`).

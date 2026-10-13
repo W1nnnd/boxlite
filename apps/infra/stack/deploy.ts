@@ -83,6 +83,10 @@ export async function deployStack() {
   const oidcClientId = new sst.Secret('OIDC_CLIENT_ID')
   const oidcMgmtClientId = new sst.Secret('OIDC_MANAGEMENT_API_CLIENT_ID')
   const oidcMgmtClientSecret = new sst.Secret('OIDC_MANAGEMENT_API_CLIENT_SECRET')
+  // The HS256 key the Post-Login Action signs its account-link adopt and
+  // status requests with; the account link merges a person's logins into one
+  // account. Empty leaves both endpoints answering 404.
+  const accountLinkSecret = new sst.Secret('OIDC_ACCOUNT_LINK_SECRET', '')
   const posthogApiKey = new sst.Secret('POSTHOG_API_KEY', '')
   const svixAuthToken = new sst.Secret('SVIX_AUTH_TOKEN', '')
   // The API key the status sync presents to incident.io — scoped to alert
@@ -111,7 +115,7 @@ export async function deployStack() {
   // stage without them deploys and simply sends nothing.
   //
   // Secrets rather than stack resources because the deploy role cannot mint
-  // them: bootstrap/aws/github-deploy-role.yaml grants IAM on roles only, and
+  // them: bootstrap/aws/deploy-role-policy.json grants IAM on roles only, and
   // an SES SMTP credential is an IAM user's access key. `npm run bootstrap --
   // --provision-ses` creates that user with the operator's own credentials and
   // stores both halves here, the same shape as OIDC_CLIENT_ID above.
@@ -236,15 +240,15 @@ export async function deployStack() {
   //
   // A build with no Api ref means nothing published an Api image for this checkout, so SST
   // builds apps/api/Dockerfile the way it always did. That is a plain local `npm run deploy`,
-  // and also `npm run runner:build-artifact`, which stages a Runner and sets only the Runner's
+  // and also `npm run runner:build-artifact:legacy`, which stages a Runner and sets only the Runner's
   // ref. deploy-infra.yml publishes both and sets the global one.
   //
   // SST hands an image string straight to the task definition (normalizeImage, sst/platform
   // fargate component), so the modes differ only in this expression.
   //
-  // The stage bootstrap template (bootstrap/aws/github-deploy-role.yaml) owns the immutable repository:
-  // an image has to be published before a fresh stack can consume one, so the consumer cannot
-  // also be responsible for creating its input.
+  // The stage bootstrap (bootstrap/aws.ts's ensureApiImageRepository) owns the immutable
+  // repository: an image has to be published before a fresh stack can consume one, so the
+  // consumer cannot also be responsible for creating its input.
   const { api } = buildApi({
     foundation,
     region: REGION,
@@ -266,6 +270,7 @@ export async function deployStack() {
     oidcClientId,
     oidcMgmtClientId,
     oidcMgmtClientSecret,
+    accountLinkSecret,
     posthogApiKey,
     svixAuthToken,
     usageExportToken,

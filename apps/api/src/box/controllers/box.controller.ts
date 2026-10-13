@@ -280,7 +280,7 @@ export class BoxController {
   ): Promise<BoxDto> {
     const box = await this.boxService.findOneByIdOrName(boxIdOrName, authContext.organizationId)
 
-    return this.boxService.toBoxDto(box)
+    return this.boxService.toBoxDtoWithExitCode(box)
   }
 
   @Post(':boxIdOrName/recover')
@@ -384,6 +384,12 @@ export class BoxController {
       updateStateDto.state,
       updateStateDto.recoverable,
       updateStateDto.errorReason,
+      // The two travel together; a report carrying a digest without a size is
+      // malformed, and recording 0 for it says the same thing a manifest that
+      // declared no layer sizes says.
+      updateStateDto.imageDigest !== undefined
+        ? { digest: updateStateDto.imageDigest, sizeBytes: updateStateDto.imageSizeBytes ?? 0 }
+        : undefined,
     )
   }
 

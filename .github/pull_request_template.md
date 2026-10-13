@@ -1,27 +1,24 @@
-## Summary
-<!-- 1-2 sentences: what this changes and why. -->
+<!-- Read and apply
+[boxlite-writing](https://github.com/boxlite-ai/agent-tooling/blob/main/plugins/boxlite-agent-tooling/.agents/skills/boxlite-writing/SKILL.md)
+to the PR description, including drafts and revisions.
+Follow the contributor guide before filling in this template:
+https://github.com/boxlite-ai/boxlite/blob/main/CONTRIBUTING.md#commit--pr-messages
+Keep the whole body within 120 words, with no paragraph over 80 and no list
+item over 40. -->
 
-## Call graph
-<!-- Required. The end-to-end path this PR touches, before and after; one line
-     per hop, only the hops that change. Worked example and the bug-fix markers:
-     CONTRIBUTING.md#commit--pr-messages. -->
+## TL;DR
 
-Before
-<!-- replace with the hops: fn_name (Type · path/file.rs:LOC) — role -->
+<!-- Summarize the intended result. -->
 
-After
-<!-- replace with the same hops, post-change -->
+Design doc: <!-- Full registered URL. -->
 
-Fixes #<!-- issue number — bug fixes only; delete this line otherwise -->
+Documentation: <!-- Link meaningful project docs added or updated in this PR;
+prefer existing docs. -->
 
-## Changes
-- <!-- notable change — what changed, not a restatement of the diff -->
+## How it works
 
-## How to verify
-- <!-- a command or step a reviewer can run -->
+<!-- Describe the mechanism or rationale. -->
 
-## Risks / rollout
-- <!-- only if any; delete this section otherwise -->
+## Verification
 
-<!-- Describe the change, not the process: no pasted logs, no AI/conversation
-     narrative, no secrets. Keep it tight and delete sections that don't apply. -->
+<!-- Decisive command → observed result, including red/green evidence for a fix. -->

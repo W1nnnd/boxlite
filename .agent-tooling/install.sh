@@ -23,6 +23,7 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 profile_file="$repo_root/.agent-tooling/profile.json"
 [[ -r "$profile_file" ]] || { printf 'agent-tooling: missing %s\n' "$profile_file" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { printf 'agent-tooling: jq is required\n' >&2; exit 1; }
+command -v perl >/dev/null 2>&1 || { printf 'agent-tooling: perl is required\n' >&2; exit 1; }
 
 tooling_repo="$(jq -er '.tooling.repository | select(type == "string" and length > 0)' "$profile_file")" || {
   printf 'agent-tooling: tooling.repository is required\n' >&2
@@ -63,6 +64,7 @@ recorded_sha() {
 hold_file="$repo_root/.agent-tooling/hold"
 target_sha=""
 target_source=""
+is_offline_repair=0
 if [[ -e "$hold_file" ]]; then
   hold_sha="$(tr -d '\n' < "$hold_file")"
   { [[ "$hold_sha" =~ ^[0-9a-f]{40}$ ]] && [[ "$(wc -c < "$hold_file")" -le 41 ]]; } || {
@@ -72,19 +74,22 @@ if [[ -e "$hold_file" ]]; then
   target_sha="$hold_sha"
   target_source="hold"
 else
-  resolved="$(git ls-remote "https://github.com/$tooling_repo.git" "refs/heads/$tooling_ref" 2>/dev/null | awk 'NR==1{print $1}')" || true
+  resolved="$(git ls-remote "https://github.com/$tooling_repo.git" "refs/heads/$tooling_ref" | awk 'NR==1{print $1}')" || resolved=""
   if [[ "$resolved" =~ ^[0-9a-f]{40}$ ]]; then
     target_sha="$resolved"
     target_source="$tooling_ref"
   else
-    # Offline (or the branch is gone). An installed consumer keeps working on the
-    # last adopted revision; only the very first installation needs the network.
+    # The record is shared across worktrees, but hook paths are worktree-local.
+    # Reuse the recorded cache through the same locked validation and setup path:
+    # an offline worktree may still be configured for an older adopted revision.
     if current="$(recorded_sha)" && [[ -d "$cache_parent/$current" ]]; then
       printf 'agent-tooling: could not resolve %s on %s; keeping %s\n' "$tooling_ref" "$tooling_repo" "$current" >&2
-      exit 0
+      target_sha="$current"
+      is_offline_repair=1
+    else
+      printf 'agent-tooling: could not resolve %s on %s and no revision is installed\n' "$tooling_ref" "$tooling_repo" >&2
+      exit 1
     fi
-    printf 'agent-tooling: could not resolve %s on %s and no revision is installed\n' "$tooling_ref" "$tooling_repo" >&2
-    exit 1
   fi
 fi
 
@@ -105,20 +110,37 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Git exports GIT_DIR to every hook it runs in a linked worktree, pointing at
+# .git/worktrees/<name> — and the lifecycle hooks reach this bootstrap through
+# scripts/sync-installation.sh. `git -C <dir>` only changes the working directory; it
+# does not clear that environment, so an unguarded git call below would operate on the
+# CONSUMER repository instead of the cache: `init` re-initializes the hook's gitdir,
+# and because its basename is not `.git` that writes core.bare=true into the SHARED
+# config, after which every worktree refuses to operate; `remote add`, `fetch`, and
+# `checkout` retarget the consumer's own remotes and working tree; and `rev-parse HEAD`
+# answers with the consumer's HEAD, which reads as a corrupt cache. Every call against
+# the cache goes through this wrapper. Only the calls that mean the consumer's
+# repository (repo_root above) are left to inherit it.
+git_cache() {
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE -u GIT_PREFIX \
+      -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_NAMESPACE \
+      git "$@"
+}
+
 checkout="$cache_parent/$target_sha"
 if [[ -e "$checkout" ]]; then
-  actual="$(git -C "$checkout" rev-parse HEAD 2>/dev/null || true)"
+  actual="$(git_cache -C "$checkout" rev-parse HEAD 2>/dev/null || true)"
   [[ "$actual" == "$target_sha" ]] || {
     printf 'agent-tooling: cached checkout has unexpected HEAD: %s\n' "$checkout" >&2
     exit 1
   }
 else
   scratch="$(mktemp -d "$cache_parent/.install.XXXXXX")"
-  git -C "$scratch" init -q
-  git -C "$scratch" remote add origin "https://github.com/$tooling_repo.git"
-  git -C "$scratch" fetch -q --depth 1 origin "$target_sha"
-  git -C "$scratch" -c advice.detachedHead=false checkout -q --detach "$target_sha"
-  actual="$(git -C "$scratch" rev-parse HEAD)"
+  git_cache -C "$scratch" init -q
+  git_cache -C "$scratch" remote add origin "https://github.com/$tooling_repo.git"
+  git_cache -C "$scratch" fetch -q --depth 1 origin "$target_sha"
+  git_cache -C "$scratch" -c advice.detachedHead=false checkout -q --detach "$target_sha"
+  actual="$(git_cache -C "$scratch" rev-parse HEAD)"
   [[ "$actual" == "$target_sha" ]] || {
     printf 'agent-tooling: fetched %s instead of resolved %s\n' "$actual" "$target_sha" >&2
     exit 1
@@ -130,6 +152,12 @@ fi
 setup="$checkout/plugins/boxlite-agent-tooling/scripts/setup.sh"
 [[ -x "$setup" ]] || { printf 'agent-tooling: fetched checkout has no executable setup script\n' >&2; exit 1; }
 "$setup" "$repo_root"
+
+if [[ "$is_offline_repair" == 1 ]]; then
+  "$checkout/plugins/boxlite-agent-tooling/scripts/verify-installation.sh" "$repo_root"
+  printf 'agent-tooling: repaired installation from cached revision %s (offline)\n' "$target_sha"
+  exit 0
+fi
 
 # Adopt: everything above succeeded, so this revision is now "current". The record
 # moves FIRST, then the metadata — deliberately. A crash between these writes can

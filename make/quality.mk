@@ -1,4 +1,7 @@
-PHONY_TARGETS += fmt lint clippy lint\:apps fmt\:apps fmt\:check\:apps
+PHONY_TARGETS += fmt lint clippy clippy\:vmm lint\:apps fmt\:apps fmt\:check\:apps
+
+clippy\:vmm:
+	@cargo clippy -p boxlite-hypervisor -p boxlite-vmm --all-targets -- -D warnings
 
 # Smart format: only format changed components.
 fmt:
@@ -191,17 +194,20 @@ fmt\:go:
 	@echo "🔧 Formatting Go code..."
 	@cd sdks/go && go fmt ./...
 	@cd src/deps/libgvproxy-sys/gvproxy-bridge && gofmt -w .
+	@cd apps/image-service && go fmt ./...
 
 fmt\:check\:go:
 	@echo "🔍 Checking Go formatting..."
 	@cd sdks/go && test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)
 	@cd src/deps/libgvproxy-sys/gvproxy-bridge && \
 		test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)
+	@cd apps/image-service && test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)
 
 lint\:go:
 	@echo "🔍 Linting Go code (vet)..."
 	@cd sdks/go && go vet -tags boxlite_dev ./...
 	@cd src/deps/libgvproxy-sys/gvproxy-bridge && go vet ./...
+	@cd apps/image-service && go vet ./...
 
 clippy: _ensure-python-deps
 	@echo "🔍 Running Rust clippy checks..."

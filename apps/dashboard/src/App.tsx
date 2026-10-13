@@ -13,7 +13,6 @@ import React, { Suspense, useEffect } from 'react'
 import { useAuth } from 'react-oidc-context'
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom'
 import { BannerProvider } from './components/Banner'
-import { CommandPaletteProvider } from './components/CommandPalette'
 import LoadingFallback from './components/LoadingFallback'
 import { Button } from './components/ui/button'
 import {
@@ -168,11 +167,9 @@ function App() {
                 <SelectedOrganizationProvider>
                   <RegionsProvider>
                     <NotificationSocketProvider>
-                      <CommandPaletteProvider>
-                        <BannerProvider>
-                          <Dashboard />
-                        </BannerProvider>
-                      </CommandPaletteProvider>
+                      <BannerProvider>
+                        <Dashboard />
+                      </BannerProvider>
                     </NotificationSocketProvider>
                   </RegionsProvider>
                 </SelectedOrganizationProvider>
@@ -202,7 +199,6 @@ function App() {
         <Route path={getRouteSubPath(RoutePath.BILLING_WALLET)} element={<Navigate to={RoutePath.BILLING} replace />} />
         <Route path={getRouteSubPath(RoutePath.LIMITS)} element={<Navigate to={RoutePath.BILLING} replace />} />
         <Route path={getRouteSubPath(RoutePath.PRICING)} element={<Navigate to={RoutePath.BILLING} replace />} />
-        {/* TODO(image-rewrite): legacy /dashboard/templates route removed with the templates page. */}
         {/* Pathless layout route: a single BoxSessionProvider fiber
             persists across the three box routes, so activation state
             (e.g. "terminal connected") survives navigation between the

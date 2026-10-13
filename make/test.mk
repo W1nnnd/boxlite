@@ -1,4 +1,5 @@
-PHONY_TARGETS += test test\:unit\:guest test\:guest-perms test\:guest-artifacts test\:perf\:import-export _ensure-infra-deps test\:apps\:infra test\:apps\:infra-config test\:skill\:boxlite-diagrams
+PHONY_TARGETS += test test\:unit\:cli test\:unit\:vmm test\:unit\:guest test\:guest-perms test\:guest-artifacts test\:perf\:import-export _ensure-infra-deps test\:apps\:infra test\:apps\:infra-config test\:skill\:boxlite-diagrams
+PHONY_TARGETS += test\:integration\:vmm\:kvm _ensure-kvm test\:vmm\:boot
 
 # Mirrors GitHub Actions strategy.fail-fast. Default false: aggregator
 # targets run every sub-suite even if an earlier one fails, then exit
@@ -17,18 +18,30 @@ export FILTER
 # that cannot be expressed as a simple positive FILTER pattern.
 export NEXTEST_FILTER_EXPR
 
+# Shared by unit-test and coverage targets; CI uses nextest's bounded CI profile.
+NEXTEST_PROFILE_FLAG = $(if $(NEXTEST_PROFILE),--profile $(NEXTEST_PROFILE),)
 NEXTEST_FILTER   = $(if $(NEXTEST_FILTER_EXPR),-E '$(NEXTEST_FILTER_EXPR)',$(if $(FILTER),-E 'test(~$(FILTER))',))
 NEXTEST_CLI_FILTER = $(if $(NEXTEST_FILTER_EXPR),-E '$(NEXTEST_FILTER_EXPR)',$(if $(FILTER),-E 'test(~$(FILTER))',-E 'not binary(stress_disk)'))
 CARGOTEST_FILTER = $(if $(FILTER),$(FILTER),)
-# The `--features rest` pass below is the only one that compiles the `rest`
-# module at all — the two passes above build --no-default-features — so every
-# rest-gated test lives or dies by this filter. It covers the whole module:
-# scoped to one test module it silently skipped the other six.
+# The `--features rest` pass (RUST_UNIT_REST_ARGS) is the only one that compiles
+# the `rest` module at all — `rest` is not a default feature and nothing else
+# in the test build enables it — so every rest-gated test lives or dies by this
+# filter. It covers the whole module: scoped to one test module it silently
+# skipped the other six.
 REST_CARGOTEST_FILTER = $(if $(FILTER),$(FILTER),rest::)
 PYTEST_FILTER    = $(if $(FILTER),-k '$(FILTER)',)
 VITEST_FILTER    = $(if $(FILTER),-t '$(FILTER)',)
 CTEST_FILTER     = $(if $(FILTER),-R '$(FILTER)',)
 GOTEST_FILTER    = $(if $(FILTER),-run '$(FILTER)',)
+
+# The Rust unit-test crate set, shared by test:unit:rust and the coverage
+# targets so coverage measures exactly what the unit suite runs. Test builds
+# still get boxlite's default features back through the boxlite-test-utils
+# dev-dependency, so they need the vendored submodules or BOXLITE_DEPS_STUB=1.
+RUST_UNIT_CORE_ARGS   = -p boxlite --no-default-features --lib
+RUST_UNIT_SHARED_ARGS = -p boxlite-shared --lib
+RUST_UNIT_REST_ARGS   = -p boxlite --no-default-features --features rest --lib
+RUST_UNIT_VMM_ARGS    = -p boxlite-hypervisor -p boxlite-vmm --lib
 
 CLI_INTEGRATION_TESTS = $(basename $(notdir $(filter-out src/cli/tests/stress_disk.rs,$(wildcard src/cli/tests/*.rs))))
 
@@ -222,24 +235,52 @@ test\:integration\:sdk:
 	$(call run_integration_suites,test:integration:python test:integration:node test:integration:c)
 
 # Rust unit tests (parallel via nextest, fallback to serial cargo test).
-# --no-default-features disables gvproxy to avoid Go runtime link issues.
 #
-# Status accumulation: both crates always run (so a `-p boxlite-shared`
+# Status accumulation: every crate set always runs (so a `-p boxlite-shared`
 # regression isn't masked by a `-p boxlite` failure aborting first), but
-# the recipe exits non-zero if EITHER crate failed. POSIX shell otherwise
+# the recipe exits non-zero if ANY of them failed. POSIX shell otherwise
 # evaluates `cmd_a; cmd_b` as the rc of cmd_b, silently swallowing cmd_a.
 test\:unit\:rust:
 	@echo "🧪 Running Rust unit tests..."
 	@rc=0; \
 	if command -v cargo-nextest >/dev/null 2>&1; then \
-		cargo nextest run --no-tests=warn -p boxlite --no-default-features --lib $(NEXTEST_FILTER) || rc=$$?; \
-		cargo nextest run --no-tests=warn -p boxlite-shared --lib $(NEXTEST_FILTER) || rc=$$?; \
+		cargo nextest run --no-tests=warn $(NEXTEST_PROFILE_FLAG) $(RUST_UNIT_CORE_ARGS) $(NEXTEST_FILTER) || rc=$$?; \
+		cargo nextest run --no-tests=warn $(NEXTEST_PROFILE_FLAG) $(RUST_UNIT_SHARED_ARGS) $(NEXTEST_FILTER) || rc=$$?; \
+		cargo nextest run --no-tests=warn $(NEXTEST_PROFILE_FLAG) $(RUST_UNIT_VMM_ARGS) $(NEXTEST_FILTER) || rc=$$?; \
 	else \
-		cargo test -p boxlite --no-default-features --lib -- --test-threads=1 $(CARGOTEST_FILTER) || rc=$$?; \
-		cargo test -p boxlite-shared --lib -- --test-threads=1 $(CARGOTEST_FILTER) || rc=$$?; \
+		cargo test $(RUST_UNIT_CORE_ARGS) -- --test-threads=1 $(CARGOTEST_FILTER) || rc=$$?; \
+		cargo test $(RUST_UNIT_SHARED_ARGS) -- --test-threads=1 $(CARGOTEST_FILTER) || rc=$$?; \
+		cargo test $(RUST_UNIT_VMM_ARGS) -- --test-threads=1 $(CARGOTEST_FILTER) || rc=$$?; \
 	fi; \
-	cargo test -p boxlite --no-default-features --features rest --lib -- --test-threads=1 $(REST_CARGOTEST_FILTER) || rc=$$?; \
+	cargo test $(RUST_UNIT_REST_ARGS) -- --test-threads=1 $(REST_CARGOTEST_FILTER) || rc=$$?; \
 	exit $$rc
+
+# CLI integration binaries need a VM; this target runs only inline unit-test modules.
+test\:unit\:cli:
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run -p boxlite-cli $(NEXTEST_PROFILE_FLAG) -E 'test(::tests::)'; \
+	else \
+		cargo test -p boxlite-cli --bins -- --test-threads=1 '::tests::'; \
+	fi
+
+# Hypervisor and VMM crate unit tests alone; they need no VM and no vendored
+# submodules.
+test\:unit\:vmm:
+	@cargo test $(RUST_UNIT_VMM_ARGS) -- $(CARGOTEST_FILTER)
+
+# Stubbed-tool contract tests for the kernel build script; they never compile Linux.
+test\:vmm\:boot:
+	@python3 "$(PROJECT_ROOT)/src/vmm/boot/tests/test_build.py"
+
+# Missing /dev/kvm must fail hardware qualification, not report skipped tests as a pass.
+_ensure-kvm:
+	@test "$$(uname -s -m)" = "Linux x86_64" || { echo "Linux x86_64 is required" >&2; exit 1; }
+	@test -r /dev/kvm -a -w /dev/kvm || { echo "Read/write access to /dev/kvm is required" >&2; exit 1; }
+
+# Run the ignored hardware tests explicitly and bound a stalled guest with a timeout.
+test\:integration\:vmm\:kvm: _ensure-kvm
+	@cargo test -p boxlite-hypervisor --lib --no-run
+	@timeout 60s cargo test -p boxlite-hypervisor --lib kvm::vm::tests:: -- --ignored --test-threads=1
 
 # Guest crate unit tests. Linux-only (the crate does not build elsewhere) and
 # excluded from test:unit:rust because the zygote suite forks real processes.
@@ -602,3 +643,10 @@ test\:stress\:api-vm-lifecycle-local:
 	BOXLITE_STRESS_P95_MS=$${BOXLITE_STRESS_P95_MS:-60000} \
 	BOXLITE_STRESS_P99_MS=$${BOXLITE_STRESS_P99_MS:-90000} \
 	k6 run --summary-trend-stats 'avg,min,med,p(90),p(95),p(99),max' scripts/test/stress/api-vm-lifecycle.k6.js
+
+PHONY_TARGETS += plugin-boxlite-force
+PLUGIN_PYTHON ?= python3
+plugin-boxlite-force:
+
+test\:unit\:plugins: plugin-boxlite-force
+	@PYTHONDONTWRITEBYTECODE=1 $(PLUGIN_PYTHON) -m unittest discover -s tests/plugins -p 'test_*.py'

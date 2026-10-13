@@ -5,7 +5,6 @@
  */
 
 import { LogoText } from '@/assets/Logo'
-import { BoxSearchCommands } from '@/components/BoxSearchCommands'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,32 +18,25 @@ import { BOXLITE_DOCS_URL, BOXLITE_SLACK_URL } from '@/constants/ExternalLinks'
 import { Theme, useTheme } from '@/contexts/ThemeContext'
 import { RoutePath } from '@/enums/RoutePath'
 import { useSelectedOrganization } from '@/hooks/useSelectedOrganization'
-import { useCopyToClipboard } from 'usehooks-ts'
-import { toast } from 'sonner'
 import { markJustLoggedOut } from '@/lib/auth-session'
 import { ONBOARDING_OPEN_EVENT } from '@/lib/onboarding-progress'
-import { cn, getMetaKey } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import {
-  ArrowRightIcon,
   BookOpen,
   Building2,
   ChevronDown,
-  Copy,
   KeyRound,
-  ListChecks,
   LogOut,
   MessageCircle,
   Monitor,
   MoonIcon,
   MoreHorizontal,
-  SearchIcon,
   SunIcon,
 } from '@/components/ui/icon'
 import { usePostHog } from 'posthog-js/react'
-import { useCallback, useMemo } from 'react'
+import { useCallback } from 'react'
 import { useAuth } from 'react-oidc-context'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { CommandConfig, useCommandPaletteActions, useRegisterCommands } from './CommandPalette'
 
 interface SidebarProps {
   isBannerVisible: boolean
@@ -92,7 +84,7 @@ function ThemeMenuItems({ theme, setTheme }: { theme: Theme; setTheme: (theme: T
             key={option.value}
             value={option.value}
             aria-label={`Use ${option.label.toLowerCase()} theme`}
-            className="h-9 justify-center gap-1.5 rounded-none border-0 border-r border-border text-xs text-muted-foreground transition-colors last:border-r-0 hover:text-foreground data-[state=on]:bg-card data-[state=on]:font-semibold data-[state=on]:text-foreground"
+            className="h-9 justify-center gap-1.5 rounded-none border-0 border-r border-border text-xs text-muted-foreground transition-colors last:border-r-0 hover:text-foreground data-[state=on]:bg-card data-[state=on]:font-semibold data-[state=on]:text-foreground data-[state=on]:shadow-[inset_0_0_0_1px_hsl(var(--foreground)/0.45)]"
           >
             {option.icon}
             <span>{option.label}</span>
@@ -101,26 +93,6 @@ function ThemeMenuItems({ theme, setTheme }: { theme: Theme; setTheme: (theme: T
       </ToggleGroup>
     </div>
   )
-}
-
-const useNavCommands = (items: NavItem[]) => {
-  const { pathname } = useLocation()
-  const navigate = useNavigate()
-
-  const navCommands: CommandConfig[] = useMemo(
-    () =>
-      items
-        .filter((item) => item.path !== pathname)
-        .map((item) => ({
-          id: `nav-${item.path}`,
-          label: `Go to ${item.label}`,
-          icon: <ArrowRightIcon className="w-4 h-4" />,
-          onSelect: () => (item.onClick ? item.onClick() : navigate(item.path)),
-        })),
-    [pathname, navigate, items],
-  )
-
-  useRegisterCommands(navCommands, { groupId: 'navigation', groupLabel: 'Navigation', groupOrder: 1 })
 }
 
 /**
@@ -136,29 +108,6 @@ export function Sidebar({ isBannerVisible }: SidebarProps) {
   const { pathname } = useLocation()
   const navigate = useNavigate()
   const { selectedOrganization } = useSelectedOrganization()
-  const [, copyToClipboard] = useCopyToClipboard()
-
-  const copyOrgId = useCallback(() => {
-    if (!selectedOrganization) return
-    copyToClipboard(selectedOrganization.id)
-    toast.success('Organization ID copied to clipboard')
-  }, [copyToClipboard, selectedOrganization])
-
-  const orgCommands = useMemo<CommandConfig[]>(
-    () =>
-      selectedOrganization
-        ? [
-            {
-              id: 'copy-org-id',
-              label: 'Copy Organization ID',
-              icon: <Copy className="w-4 h-4" />,
-              onSelect: copyOrgId,
-            },
-          ]
-        : [],
-    [selectedOrganization, copyOrgId],
-  )
-  useRegisterCommands(orgCommands, { groupId: 'organization', groupLabel: 'Organization', groupOrder: 5 })
 
   const primaryItems: NavItem[] = PRIMARY_NAV_ITEMS
 
@@ -171,34 +120,10 @@ export function Sidebar({ isBannerVisible }: SidebarProps) {
     }
   }, [navigate])
 
-  const commandItems = useMemo<NavItem[]>(
-    () => [
-      ...primaryItems,
-      { path: RoutePath.KEYS, label: 'API Keys', icon: <KeyRound size={16} strokeWidth={1.5} /> },
-      {
-        path: RoutePath.ONBOARDING,
-        label: 'Onboarding',
-        icon: <ListChecks size={16} strokeWidth={1.5} />,
-        onClick: openOnboardingGuide,
-      },
-    ],
-    [openOnboardingGuide, primaryItems],
-  )
-
   const handleSignOut = () => {
     posthog?.reset()
     markJustLoggedOut()
     signoutRedirect()
-  }
-
-  const commandPaletteActions = useCommandPaletteActions()
-  useNavCommands(commandItems)
-
-  const metaKey = getMetaKey()
-
-  const openCommandPalette = (source: string) => {
-    posthog?.capture('command_palette_opened', { source })
-    commandPaletteActions.setIsOpen(true)
   }
 
   const userName = user?.profile.name || user?.profile.email || 'Profile'
@@ -210,12 +135,18 @@ export function Sidebar({ isBannerVisible }: SidebarProps) {
       .join('')
       .toUpperCase() || 'U'
 
-  // One full-height nav cell. Selection is conveyed purely by value/grayscale — no hue:
-  // active = neutral grey fill + brightest (foreground) label; inactive = dimmer muted text.
+  // One full-height nav cell. No edge of its own: the header is a continuous
+  // strip and a bright rule around one cell would cut it. The chosen cell is
+  // the surface that differs from the strip, and its label is the only one at
+  // full weight and full value.
+  //
+  // `bg-accent` used to carry this alone. It measures 1.18:1 against the
+  // header on the light theme, and it is also this console's hover tint, so
+  // "you are here" and "your pointer is here" were the same grey.
   const navCellClass = (active: boolean, extra?: string) =>
     cn(
-      'relative h-full items-center gap-2 px-[18px] text-[13px] font-medium transition-colors',
-      active ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-card hover:text-foreground',
+      'relative h-full items-center gap-2 px-[18px] text-[13px] transition-colors',
+      active ? 'bg-card font-semibold text-foreground' : 'font-medium text-muted-foreground hover:text-foreground',
       extra,
     )
 
@@ -226,8 +157,6 @@ export function Sidebar({ isBannerVisible }: SidebarProps) {
         isBannerVisible ? 'top-16 md:top-12' : 'top-0',
       )}
     >
-      <BoxSearchCommands />
-
       {/* brand */}
       <Link
         to={RoutePath.BOXES}
@@ -248,20 +177,6 @@ export function Sidebar({ isBannerVisible }: SidebarProps) {
       })}
 
       <div className="flex-1" />
-
-      {/* search → command palette */}
-      <button
-        type="button"
-        onClick={() => openCommandPalette('dashboard_header')}
-        aria-label="Search"
-        className="hidden min-w-[180px] items-center gap-2.5 border-l border-border px-4 text-muted-foreground transition-colors hover:text-foreground lg:flex"
-      >
-        <SearchIcon className="size-3.5 shrink-0" />
-        <span className="flex-1 text-left">Search</span>
-        <span className="rounded-none border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground">
-          {metaKey} K
-        </span>
-      </button>
 
       {/* api keys */}
       <Link
@@ -348,11 +263,6 @@ export function Sidebar({ isBannerVisible }: SidebarProps) {
           <MoreHorizontal className="size-4" />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-[14rem]">
-          <DropdownMenuItem className="cursor-pointer" onClick={() => openCommandPalette('dashboard_mobile_menu')}>
-            <SearchIcon className="size-4" />
-            Search
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
           {primaryItems.map((item) => (
             <DropdownMenuItem key={item.label} asChild className="cursor-pointer">
               <Link to={item.path}>{item.label}</Link>

@@ -11,33 +11,49 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"os/user"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	boxlite "github.com/boxlite-ai/boxlite/sdks/go"
 	"github.com/boxlite-ai/runner/pkg/api/dto"
+	"github.com/boxlite-ai/runner/pkg/models"
 	"github.com/boxlite-ai/runner/pkg/models/enums"
 	"go.opentelemetry.io/otel/propagation"
 )
 
+// PulledImage is what a box's image reference resolved to on this runner: the
+// registry's own digest and the size the manifest declared.
+type PulledImage struct {
+	Digest    string
+	SizeBytes int64
+}
+
 // Client wraps the BoxLite Go SDK to provide the same interface as the Docker client.
 // It manages VMs instead of containers, providing hardware-level isolation.
 type Client struct {
-	runtime            *boxlite.Runtime
-	logger             *slog.Logger
-	homeDir            string
-	mu                 sync.RWMutex
-	boxes              map[string]*boxlite.Box
-	awsRegion          string
-	awsEndpointUrl     string
-	awsAccessKeyId     string
-	awsSecretAccessKey string
-	volumeMutexes      map[string]*sync.Mutex
-	volumeMutexesMutex sync.Mutex
-	volumeCleanupMutex sync.Mutex
-	lastVolumeCleanup  time.Time
-	volumeCleanup      volumeCleanupConfig
+	runtime *boxlite.Runtime
+	logger  *slog.Logger
+	homeDir string
+	mu      sync.RWMutex
+	boxes   map[string]*boxlite.Box
+	// What each freshly created box's image resolved to, until it has been
+	// reported once. Held in memory only: an entry lost to a runner restart is
+	// simply gone, and the control plane re-resolves on the next create.
+	pendingImageReports map[string]PulledImage
+	awsRegion           string
+	awsEndpointUrl      string
+	awsAccessKeyId      string
+	awsSecretAccessKey  string
+	volumeBackend       string
+	volumeMutexes       map[string]*sync.Mutex
+	volumeMutexesMutex  sync.Mutex
+	volumeCleanupMutex  sync.Mutex
+	lastVolumeCleanup   time.Time
+	volumeCleanup       volumeCleanupConfig
 }
 
 // ClientConfig holds configuration for the BoxLite client.
@@ -45,14 +61,12 @@ type ClientConfig struct {
 	Logger                       *slog.Logger
 	HomeDir                      string
 	InsecureRegistries           []string
-	GhcrUsername                 string
-	GhcrToken                    string
-	DockerHubUsername            string
-	DockerHubToken               string
+	RegistryProxy                RegistryProxy
 	AWSRegion                    string
 	AWSEndpointUrl               string
 	AWSAccessKeyId               string
 	AWSSecretAccessKey           string
+	VolumeStorageBackend         string
 	VolumeCleanupInterval        time.Duration
 	VolumeCleanupDryRun          bool
 	VolumeCleanupExclusionPeriod time.Duration
@@ -122,56 +136,166 @@ func secretSpecs(secrets []dto.SecretDTO) []boxlite.Secret {
 	return specs
 }
 
-// buildImageRegistries assembles the runtime-scoped OCI registry list handed to boxlite-core:
-// the existing insecure (HTTP, no-auth) registries, plus — when ghcr credentials are provided —
-// a single authenticated ghcr.io HTTPS entry so core can pull private images
-// directly from ghcr (no self-hosted registry mirror required). Auth is runtime-scoped because
-// boxlite.Runtime.Create has no per-call credential parameter. When ghcrUsername/ghcrToken are
-// empty this is byte-for-byte the previous behavior (anonymous), so it is safe to ship dark.
-// Kept as a pure function so the wiring can be unit-tested without constructing a real runtime.
-func buildImageRegistries(insecureRegistries []string, ghcrUsername, ghcrToken string) []boxlite.ImageRegistry {
+// RegistryProxy is where the runner sends a pull for an image whose registry
+// credentials only the platform holds, and the runner's own credential for it.
+// The password is the runner's API key: the proxy authenticates a caller by
+// asking the control plane whose key it is.
+type RegistryProxy struct {
+	Host     string
+	Username string
+	Password string
+}
+
+// complete reports whether all three were given, which is the only state in
+// which the proxy is used at all.
+//
+// The host is judged after it is reduced to one, not as written: a value that
+// reduces to nothing — a bare scheme, whitespace — is as unusable as one left
+// out, and treating it as given would drop the proxy without a word.
+func (p RegistryProxy) complete() bool {
+	return registryHost(p.Host) != "" && p.Username != "" && p.Password != ""
+}
+
+// missing names the variables a partly configured proxy lacks or cannot use.
+// Empty for a proxy that is complete or not configured at all.
+func (p RegistryProxy) missing() []string {
+	given := map[string]bool{
+		"REGISTRY_PROXY_HOST":     registryHost(p.Host) != "",
+		"REGISTRY_PROXY_USERNAME": p.Username != "",
+		"REGISTRY_PROXY_PASSWORD": p.Password != "",
+	}
+	var absent []string
+	for _, name := range []string{"REGISTRY_PROXY_HOST", "REGISTRY_PROXY_USERNAME", "REGISTRY_PROXY_PASSWORD"} {
+		if !given[name] {
+			absent = append(absent, name)
+		}
+	}
+	if len(absent) == len(given) {
+		return nil
+	}
+	return absent
+}
+
+// warnOnPartialRegistryProxy says so when a stage configured some of the proxy
+// and not the rest. That is almost always an unfinished setting rather than an
+// intent, and without a word it would look like the proxy being ignored.
+func warnOnPartialRegistryProxy(logger *slog.Logger, proxy RegistryProxy) {
+	if absent := proxy.missing(); len(absent) > 0 {
+		logger.Warn("Registry proxy is partly configured and will not be used", "missing", strings.Join(absent, ", "))
+	}
+}
+
+// buildImageRegistries assembles the runtime-scoped OCI registry list handed
+// to boxlite-core: the insecure (HTTP) registries, and — when the registry
+// proxy is fully configured — one entry for it. A registry's credential is
+// never here.
+//
+// Core matches credentials by host, and this runtime pulls the operator's
+// curated images and references tenants named from the same hosts. A
+// credential here would be spent on any tenant reference to its host, so the
+// runtime holds none and every image pulls anonymously — which is why the
+// curated images must be public. The proxy's entry is the exception that
+// proves it: it carries the runner's own key, not a registry's, which is safe
+// only while no tenant reference names the proxy host — a reference the API's
+// image admission has to refuse.
+// With no proxy configured this is byte-for-byte the anonymous list, so the
+// proxy is safe to ship dark. Kept as a pure function so that is testable
+// without constructing a real runtime.
+//
+// No host is named twice. The runtime matches a host to the first entry naming it and ignores
+// the rest, for transport and credential alike, so a registry proxy that is also listed as
+// insecure — the local stack's, served over plain HTTP — is one entry carrying both: HTTP from
+// the insecure list, the credential from the proxy. Two entries would let the credential-less
+// one win.
+//
+// The proxy is never searched. Search makes an unqualified reference like `alpine:3.20` try
+// this host, and nothing about an image a caller names without a registry should route it here.
+func buildImageRegistries(insecureRegistries []string, proxy RegistryProxy) []boxlite.ImageRegistry {
+	proxyHost := ""
+	if proxy.complete() {
+		proxyHost = registryHost(proxy.Host)
+	}
+
 	registries := make([]boxlite.ImageRegistry, 0, len(insecureRegistries)+1)
+	proxyIsInsecure := false
 	for _, host := range insecureRegistries {
+		if host == proxyHost {
+			proxyIsInsecure = true
+			continue
+		}
 		registries = append(registries, boxlite.ImageRegistry{
 			Host:       host,
 			Transport:  boxlite.RegistryTransportHTTP,
 			SkipVerify: true,
 		})
 	}
-	if ghcrUsername != "" && ghcrToken != "" {
-		registries = append(registries, boxlite.ImageRegistry{
-			Host:      "ghcr.io",
+	if proxyHost != "" {
+		entry := boxlite.ImageRegistry{
+			Host:      proxyHost,
 			Transport: boxlite.RegistryTransportHTTPS,
+			Search:    false,
 			Auth: boxlite.ImageRegistryAuth{
-				Username: ghcrUsername,
-				Password: ghcrToken,
+				Username: proxy.Username,
+				Password: proxy.Password,
 			},
-		})
+		}
+		if proxyIsInsecure {
+			entry.Transport = boxlite.RegistryTransportHTTP
+			entry.SkipVerify = true
+		}
+		registries = append(registries, entry)
 	}
 	return registries
 }
 
+// resolveHomeDir picks the BoxLite home the way boxlite-core does when it is
+// given none: the configured directory, then $BOXLITE_HOME, then .boxlite under
+// the user's home — $HOME, or the passwd entry when $HOME is unset. The runner
+// hands the result to core, so the runtime and everything here that reads the
+// home (migration staging) agree on one directory. Two cases differ from core:
+// an empty $BOXLITE_HOME counts as unset, and with neither $HOME nor a passwd
+// entry this returns an error instead of falling back to ./.boxlite.
+func resolveHomeDir(configured string) (string, error) {
+	if configured != "" {
+		return configured, nil
+	}
+	if home := os.Getenv("BOXLITE_HOME"); home != "" {
+		return home, nil
+	}
+	userHome := os.Getenv("HOME")
+	if userHome == "" {
+		current, err := currentUser()
+		if err != nil {
+			return "", fmt.Errorf("cannot locate the BoxLite home directory; set BOXLITE_HOME_DIR: %w", err)
+		}
+		// A passwd entry without a home would turn into the relative path
+		// ".boxlite", which core rejects with a less helpful error.
+		if current.HomeDir == "" {
+			return "", fmt.Errorf("cannot locate the BoxLite home directory; set BOXLITE_HOME_DIR: user %q has no home directory", current.Username)
+		}
+		userHome = current.HomeDir
+	}
+	return filepath.Join(userHome, ".boxlite"), nil
+}
+
+// currentUser is the passwd lookup behind the last fallback; tests replace it.
+var currentUser = user.Current
+
 // NewClient creates a new BoxLite client backed by the BoxLite VM runtime.
 func NewClient(ctx context.Context, config ClientConfig) (*Client, error) {
-	var opts []boxlite.RuntimeOption
-	if config.HomeDir != "" {
-		opts = append(opts, boxlite.WithHomeDir(config.HomeDir))
+	homeDir, err := resolveHomeDir(config.HomeDir)
+	if err != nil {
+		return nil, err
 	}
+	opts := []boxlite.RuntimeOption{boxlite.WithHomeDir(homeDir)}
+	logger := config.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	warnOnPartialRegistryProxy(logger, config.RegistryProxy)
+
 	insecureRegistries := normalizeRegistryHosts(config.InsecureRegistries)
-	registries := buildImageRegistries(insecureRegistries, config.GhcrUsername, config.GhcrToken)
-	// docker.io auth (local dev): boxlite-core pulls box base images (e.g. the
-	// debian base disk + public user images) from docker.io; without auth those
-	// hit the anonymous Docker Hub rate limit. Mirror the ghcr.io auth entry.
-	if config.DockerHubUsername != "" && config.DockerHubToken != "" {
-		registries = append(registries, boxlite.ImageRegistry{
-			Host:      "docker.io",
-			Transport: boxlite.RegistryTransportHTTPS,
-			Auth: boxlite.ImageRegistryAuth{
-				Username: config.DockerHubUsername,
-				Password: config.DockerHubToken,
-			},
-		})
-	}
+	registries := buildImageRegistries(insecureRegistries, config.RegistryProxy)
 	if len(registries) > 0 {
 		opts = append(opts, boxlite.WithImageRegistries(registries...))
 	}
@@ -181,27 +305,46 @@ func NewClient(ctx context.Context, config ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("failed to create boxlite runtime: %w", err)
 	}
 
-	logger := config.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
-
 	return &Client{
-		runtime:            rt,
-		logger:             logger,
-		homeDir:            config.HomeDir,
-		boxes:              make(map[string]*boxlite.Box),
-		awsRegion:          config.AWSRegion,
-		awsEndpointUrl:     config.AWSEndpointUrl,
-		awsAccessKeyId:     config.AWSAccessKeyId,
-		awsSecretAccessKey: config.AWSSecretAccessKey,
-		volumeMutexes:      make(map[string]*sync.Mutex),
+		runtime:             rt,
+		logger:              logger,
+		homeDir:             homeDir,
+		boxes:               make(map[string]*boxlite.Box),
+		pendingImageReports: make(map[string]PulledImage),
+		awsRegion:           config.AWSRegion,
+		awsEndpointUrl:      config.AWSEndpointUrl,
+		awsAccessKeyId:      config.AWSAccessKeyId,
+		awsSecretAccessKey:  config.AWSSecretAccessKey,
+		volumeBackend:       config.VolumeStorageBackend,
+		volumeMutexes:       make(map[string]*sync.Mutex),
 		volumeCleanup: volumeCleanupConfig{
 			interval:        config.VolumeCleanupInterval,
 			dryRun:          config.VolumeCleanupDryRun,
 			exclusionPeriod: config.VolumeCleanupExclusionPeriod,
 		},
 	}, nil
+}
+
+// PendingImageReport returns what a box's image resolved to, when this runner
+// created that box and has not yet reported it.
+func (c *Client) PendingImageReport(boxId string) (PulledImage, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	pulled, ok := c.pendingImageReports[boxId]
+	return pulled, ok
+}
+
+// ClearPendingImageReport drops a report that has been delivered. Separate from
+// reading it so a report the control plane refused is retried rather than lost.
+func (c *Client) ClearPendingImageReport(boxId string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.pendingImageReports, boxId)
+}
+
+// HomeDir is the directory the runtime keeps boxes, images and its database in.
+func (c *Client) HomeDir() string {
+	return c.homeDir
 }
 
 // Shutdown gracefully stops all running boxes in the underlying BoxLite
@@ -350,9 +493,47 @@ func (c *Client) Create(ctx context.Context, boxDto dto.CreateBoxDTO) (string, s
 		if err := bx.Start(ctx); err != nil {
 			return bx.ID(), "", fmt.Errorf("failed to start box: %w", err)
 		}
+		c.recordPulledImage(ctx, boxDto.Id, bx)
 	}
 
 	return bx.ID(), "boxlite", nil
+}
+
+// boxInfoReader is the one thing recordPulledImage needs from a box. A
+// *boxlite.Box satisfies it; a test stubs it, since a real box's Info crosses
+// the FFI.
+type boxInfoReader interface {
+	Info(ctx context.Context) (*boxlite.BoxInfo, error)
+}
+
+// recordPulledImage notes what a box's image reference resolved to, so the
+// control plane can be told once.
+//
+// Only a started box has an answer: GetOrCreate allocates a handle and
+// persists the box, and the image is not pulled until the first start
+// (rt_impl.rs — "The VM is not started until start() or exec() is called").
+// Asking any earlier reads an answer that does not exist yet. It never fails
+// its caller, so it can sit after Start without breaking the rule that Start
+// is Create's last fallible step: info that cannot be read is logged and the
+// report dropped, which costs one re-resolution on the next create.
+func (c *Client) recordPulledImage(ctx context.Context, boxId string, bx boxInfoReader) {
+	// Not cancelled with the request: the box has started either way, and a
+	// report dropped for that reason is one the control plane pays for later.
+	info, err := bx.Info(context.WithoutCancel(ctx))
+	if err != nil {
+		c.logger.WarnContext(ctx, "cannot read what the box's image resolved to; dropping the report",
+			"box", boxId, "error", err)
+		return
+	}
+	if info.ResolvedImage == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingImageReports[boxId] = PulledImage{
+		Digest:    info.ResolvedImage.ManifestDigest,
+		SizeBytes: info.ResolvedImage.TotalLayerSize,
+	}
 }
 
 // Start starts a stopped box and returns the runtime version.
@@ -368,6 +549,9 @@ func (c *Client) Start(ctx context.Context, boxId string, authToken *string, met
 	if err := bx.Start(ctx); err != nil {
 		return "", err
 	}
+	// The other place a box is first started: one created with SkipStart has
+	// pulled nothing until now.
+	c.recordPulledImage(ctx, boxId, bx)
 	return "boxlite", nil
 }
 
@@ -387,12 +571,7 @@ func (c *Client) Stop(ctx context.Context, boxId string, force bool) error {
 
 // Destroy removes a box entirely.
 func (c *Client) Destroy(ctx context.Context, boxId string) error {
-	c.mu.Lock()
-	if bx, ok := c.boxes[boxId]; ok {
-		bx.Close()
-		delete(c.boxes, boxId)
-	}
-	c.mu.Unlock()
+	c.forgetBox(boxId)
 
 	if err := c.runtime.ForceRemove(ctx, boxId); err != nil {
 		return err
@@ -411,7 +590,7 @@ func (c *Client) Destroy(ctx context.Context, boxId string) error {
 // neutral default: the API counts it as compute-consuming while Error is not,
 // so Failed must map explicitly to Error.
 //
-// Exported apart from GetBoxState because a caller that already holds a
+// Exported apart from GetBoxInfo because a caller that already holds a
 // BoxInfo must not fetch a second one: BoxSync pairs the state with the box's
 // StartedAt, and reading the two at different moments is what lets a stale
 // timestamp meet a fresh state.
@@ -438,24 +617,32 @@ func ToBoxState(state boxlite.State) enums.BoxState {
 	}
 }
 
-// GetBoxState returns the current state of a box.
+// GetBoxInfo returns a box's current state together with the main command's
+// exit code, when the runtime recorded one.
 //
-// It reads through the runtime rather than the handle cache. The box sync loop
-// calls this for every box on a 10s ticker (services/box_sync.go), and a state
-// read needs no bootable handle — only the persisted record. Routing it through
-// getOrFetchBox would evict and re-fetch a handle for every non-running box on
-// every tick, and eviction cannot free the old one (see evictBox), so the
-// runner would accumulate dead handles for as long as it ran.
-func (c *Client) GetBoxState(ctx context.Context, boxId string) (enums.BoxState, error) {
+// Both come from a single GetInfo snapshot on purpose. Read apart, a state
+// from one moment could meet an exit code from another, and the pair would
+// describe two different lifecycles — the same trap ToBoxState's comment
+// describes for StartedAt.
+//
+// It reads through the runtime rather than the handle cache: a state read
+// needs no bootable handle, only the persisted record. Routing it through
+// getOrFetchBox would evict and re-fetch a handle for every non-running box,
+// and eviction cannot free the old one (see evictBox), so the runner would
+// accumulate dead handles for as long as it ran.
+func (c *Client) GetBoxInfo(ctx context.Context, boxId string) (models.BoxInfo, error) {
 	info, err := c.runtime.GetInfo(ctx, boxId)
 	if err != nil {
 		if boxlite.IsNotFound(err) {
-			return enums.BoxStateUnknown, nil
+			return models.BoxInfo{BoxState: enums.BoxStateUnknown}, nil
 		}
-		return enums.BoxStateUnknown, err
+		return models.BoxInfo{BoxState: enums.BoxStateUnknown}, err
 	}
 
-	return ToBoxState(info.State), nil
+	return models.BoxInfo{
+		BoxState: ToBoxState(info.State),
+		ExitCode: info.ExitCode,
+	}, nil
 }
 
 // StartExecution starts an interactive execution in a box.
@@ -612,6 +799,23 @@ func (c *Client) getOrFetchBox(ctx context.Context, boxId string) (*boxlite.Box,
 	return bx, nil
 }
 
+// forgetBox drops everything this client still holds for a box that is being
+// destroyed: the cached handle, and any image report the box never got to
+// deliver. The report has to go with it — the control plane records an image
+// only on the push that says the box started, so one still owed for a box that
+// no longer exists can never be delivered, and left behind it would accumulate
+// one entry per box this runner ever destroyed.
+func (c *Client) forgetBox(boxId string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if bx, ok := c.boxes[boxId]; ok {
+		bx.Close()
+		delete(c.boxes, boxId)
+	}
+	delete(c.pendingImageReports, boxId)
+}
+
 // evictBox unmaps a handle so the next lookup fetches a fresh one, and only
 // while it is still the cached one — a concurrent Create or fetch may already
 // have replaced it, and unmapping the winner would drop a live entry.
@@ -623,8 +827,8 @@ func (c *Client) getOrFetchBox(ctx context.Context, boxId string) (*boxlite.Box,
 // frees what is still in the map. The cost is one handle per request that finds
 // its box down: calls that go on to boot it stop there, while ones that refuse a
 // stopped box (metrics, a guest-port dial) pay it again on every retry. That is
-// affordable only because it tracks request volume — which is why GetBoxState,
-// run for every box on a timer, deliberately does not come through here.
+// affordable only because it tracks request volume — which is why GetBoxInfo
+// reads through the runtime rather than coming through here.
 // Ref-counting the wrapper is the real fix, and it belongs in the SDK.
 func (c *Client) evictBox(boxId string, stale *boxlite.Box) {
 	c.mu.Lock()

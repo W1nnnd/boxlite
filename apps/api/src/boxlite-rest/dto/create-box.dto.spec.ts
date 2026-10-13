@@ -8,7 +8,11 @@ import 'reflect-metadata'
 import { ValidationPipe } from '@nestjs/common'
 import { validate } from 'class-validator'
 import { plainToInstance } from 'class-transformer'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { parse } from 'yaml'
 import { CreateBoxDto } from './create-box.dto'
+import { createBoxToCreateBox } from '../mappers/box-to-box.mapper'
 
 // A box with 0 vCPUs can never boot (libkrun set_vm_config(0, ...) -> EINVAL),
 // so the create endpoint must reject undersized resources at the request
@@ -38,6 +42,21 @@ describe('CreateBoxDto resource minimums', () => {
     const errors = await validate(plainToInstance(CreateBoxDto, { image: 'alpine:3.23' }))
 
     expect(errors).toHaveLength(0)
+  })
+})
+
+// Resource sizes are integers end to end (integer DB columns); pin the
+// boundary so fractions never reach the warm-pool integer query.
+describe('CreateBoxDto resource integrality', () => {
+  it.each([
+    ['cpus', { cpus: 1.5 }],
+    ['memory_mib', { memory_mib: 256.5 }],
+    ['disk_size_gb', { disk_size_gb: 1.5 }],
+  ])('rejects fractional %s with an isInt constraint', async (field, body) => {
+    const errors = await validate(plainToInstance(CreateBoxDto, body))
+
+    const fieldError = errors.find((error) => error.property === field)
+    expect(fieldError?.constraints).toHaveProperty('isInt')
   })
 })
 
@@ -347,6 +366,33 @@ describe('CreateBoxDto legacy network compatibility through the request pipeline
 
   it('rejects a non-empty array for network, as before', async () => {
     await expect(pipe.transform({ image: 'alpine:latest', network: [{ mode: 'enabled' }] }, meta)).rejects.toThrow()
+  })
+})
+
+describe('REST create inbound default contract', () => {
+  const pipe = new ValidationPipe({ transform: true })
+  const meta = { type: 'body' as const, metatype: CreateBoxDto }
+
+  it.each([
+    ['network omitted', undefined, false],
+    ['empty network', {}, false],
+    ['legacy flat outbound enabled', { mode: 'enabled' }, false],
+    ['legacy flat outbound disabled', { mode: 'disabled' }, false],
+    ['nested outbound only', { outbound: { mode: 'enabled' } }, false],
+    ['inbound enabled', { inbound: { mode: 'enabled' } }, true],
+    ['inbound disabled', { inbound: { mode: 'disabled' } }, false],
+  ])('maps %s to the expected public value', async (_label, network, expectedPublic) => {
+    const dto: CreateBoxDto = await pipe.transform({ image: 'alpine:latest', network }, meta)
+
+    expect(createBoxToCreateBox(dto).public).toBe(expectedPublic)
+  })
+
+  it('keeps the OpenAPI omission defaults aligned with the REST create behavior', () => {
+    const spec = parse(readFileSync(resolve(__dirname, '../../../../../openapi/box.openapi.yaml'), 'utf8'))
+    const schemas = spec.components.schemas
+
+    expect(schemas.CreateBoxRequest.properties.network.default).toEqual({ inbound: { mode: 'disabled' } })
+    expect(schemas.NetworkSpec.properties.inbound.default).toEqual({ mode: 'disabled' })
   })
 })
 

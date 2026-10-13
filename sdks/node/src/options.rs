@@ -376,7 +376,11 @@ pub struct JsOutboundNetworkSpec {
     /// Outbound allowlist when network is enabled. Restricts both TCP and UDP.
     /// Hostname entries rely on TLS SNI / HTTP Host inspection, which only TCP
     /// carries, so a hostname-only list denies all UDP egress — add the IP or
-    /// CIDR to keep UDP open.
+    /// CIDR to keep UDP open. A host matched by a configured secret is
+    /// additionally reachable on port 443 without an entry of its own, so this
+    /// list is not the only egress gate. That connection is dialed by name,
+    /// and under a non-empty list an answer in a private, loopback or CGNAT
+    /// range is refused unless an IP or CIDR rule covers it.
     #[napi(js_name = "allowNet")]
     pub allow_net: Option<Vec<String>>,
 }
@@ -471,7 +475,7 @@ impl TryFrom<JsNetworkSpec> for (NetworkSpec, NetworkSpec) {
                 mode: inbound.mode.parse::<NetworkMode>()?,
                 allow_net: inbound.allow_net.unwrap_or_default(),
             })?,
-            None => NetworkSpec::default(),
+            None => NetworkSpec::disabled(),
         };
         Ok((outbound, inbound))
     }
@@ -495,7 +499,7 @@ impl TryFrom<JsBoxOptions> for BoxOptions {
         // Convert network spec — the two directions become two fields
         let (network, inbound_network) = match js_opts.network {
             Some(spec) => <(NetworkSpec, NetworkSpec)>::try_from(spec)?,
-            None => (NetworkSpec::default(), NetworkSpec::default()),
+            None => (NetworkSpec::default(), NetworkSpec::disabled()),
         };
 
         // Convert ports
@@ -563,6 +567,8 @@ impl TryFrom<JsBoxOptions> for BoxOptions {
             env,
             rootfs,
             volumes,
+            // Typed mounts(TODO): this SDK has no field for them.
+            mounts: Vec::new(),
             network,
             inbound_network,
             ports,
@@ -1041,7 +1047,7 @@ mod tests {
     }
 
     /// The pre-split shape configured the outbound direction; it must keep
-    /// doing exactly that, and leave inbound at its default.
+    /// doing exactly that, and leave inbound at its default (private).
     #[test]
     fn legacy_flat_network_spec_converts_to_outbound() {
         let (outbound, inbound) = <(NetworkSpec, NetworkSpec)>::try_from(JsNetworkSpec {
@@ -1053,7 +1059,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(outbound, NetworkSpec::Disabled));
-        assert!(matches!(inbound, NetworkSpec::Enabled { .. }));
+        assert!(matches!(inbound, NetworkSpec::Disabled));
     }
 
     #[test]

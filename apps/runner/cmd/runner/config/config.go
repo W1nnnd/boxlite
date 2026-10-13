@@ -36,6 +36,7 @@ type Config struct {
 	AWSAccessKeyId                     string        `envconfig:"AWS_ACCESS_KEY_ID"`
 	AWSSecretAccessKey                 string        `envconfig:"AWS_SECRET_ACCESS_KEY"`
 	AWSDefaultBucket                   string        `envconfig:"AWS_DEFAULT_BUCKET"`
+	VolumeStorageBackend               string        `envconfig:"VOLUME_STORAGE_BACKEND" default:"s3" validate:"oneof=s3 gcs"`
 	ResourceLimitsDisabled             bool          `envconfig:"RESOURCE_LIMITS_DISABLED"`
 	BoxStartTimeoutSec                 int           `envconfig:"BOX_START_TIMEOUT_SEC"`
 	UseSnapshotEntrypoint              bool          `envconfig:"USE_SNAPSHOT_ENTRYPOINT"`
@@ -58,10 +59,9 @@ type Config struct {
 	BuildEngine                        string        `envconfig:"BUILD_ENGINE" default:"buildkit" validate:"oneof=buildkit legacy"`
 	BoxliteHomeDir                     string        `envconfig:"BOXLITE_HOME_DIR"`
 	InsecureRegistries                 string        `envconfig:"INSECURE_REGISTRIES"`
-	GhcrUsername                       string        `envconfig:"GHCR_USERNAME"`
-	GhcrToken                          string        `envconfig:"GHCR_TOKEN"`
-	DockerHubUsername                  string        `envconfig:"DOCKERHUB_USERNAME"`
-	DockerHubToken                     string        `envconfig:"DOCKERHUB_TOKEN"`
+	RegistryProxyHost                  string        `envconfig:"REGISTRY_PROXY_HOST"`
+	RegistryProxyUsername              string        `envconfig:"REGISTRY_PROXY_USERNAME"`
+	RegistryProxyPassword              string        `envconfig:"REGISTRY_PROXY_PASSWORD"`
 	MigrateWorkDir                     string        `envconfig:"MIGRATE_WORK_DIR"`
 }
 

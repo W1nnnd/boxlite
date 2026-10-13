@@ -234,9 +234,10 @@ impl RuntimeImpl {
         Self::initialize(options, experimental_features)
     }
 
-    /// Build a runtime without host validation. Tests using this must not exercise
-    /// VM or hypervisor operations.
-    #[cfg(test)]
+    /// Build a runtime without host validation, so unit tests also run on hosts
+    /// without usable virtualization, such as CI runners. Tests using this must
+    /// not exercise VM or hypervisor operations.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new_for_test(options: BoxliteOptions) -> BoxliteResult<SharedRuntimeImpl> {
         Self::initialize(options, ExperimentalFeatures::default())
     }
@@ -1218,6 +1219,10 @@ impl RuntimeImpl {
     /// the canonical `boxes_dir/<box_id>` path. The box is persisted with the
     /// given `initial_status` (typically `Stopped` for clone/import operations).
     ///
+    /// `resolved_image` is what the staged disk was built from, when the caller
+    /// knows. It has to be passed in: the new box's first start reuses that
+    /// disk, and a start that reuses a disk records nothing of its own.
+    ///
     /// On failure, cleans up the allocated lock and box directory.
     pub(crate) async fn provision_box(
         self: &Arc<Self>,
@@ -1225,6 +1230,7 @@ impl RuntimeImpl {
         name: Option<String>,
         options: BoxOptions,
         initial_status: BoxStatus,
+        resolved_image: Option<crate::images::ResolvedImage>,
     ) -> BoxliteResult<LiteBox> {
         use crate::litebox::config::ContainerRuntimeConfig;
 
@@ -1256,6 +1262,7 @@ impl RuntimeImpl {
 
         let mut state = BoxState::new();
         state.set_status(initial_status);
+        state.resolved_image = resolved_image;
 
         let lock_id = self.lock_manager.allocate()?;
         state.set_lock_id(lock_id);
@@ -1763,6 +1770,14 @@ fn reject_local_unsupported_options(options: &BoxOptions) -> BoxliteResult<()> {
         )));
     }
 
+    // The local runtime shares no typed mounts yet(TODO): refused here, before
+    // the image pull and the box record, rather than dropped at boot.
+    if !options.mounts.is_empty() {
+        return Err(BoxliteError::Unsupported(
+            "typed mounts are not supported by the local runtime yet".into(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -2006,6 +2021,24 @@ mod tests {
         assert!(message.contains("REST runtime"), "{message}");
     }
 
+    /// Until the local runtime shares typed mounts, create refuses them rather
+    /// than booting a box without them.
+    #[tokio::test]
+    async fn local_runtime_refuses_typed_mounts_until_it_shares_them() {
+        use crate::runtime::options::MountSpec;
+
+        let options = BoxOptions {
+            mounts: vec![MountSpec::bind_mount("/tmp/data", "/data")],
+            ..Default::default()
+        };
+        let error = sanitize_local_options(&ExperimentalFeatures::default(), options)
+            .await
+            .expect_err("the local runtime shares no typed mounts yet");
+
+        assert!(matches!(error, BoxliteError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("typed mounts"), "{error}");
+    }
+
     #[test]
     fn options_compatibility_normalizes_capability_names() {
         let mut actual = test_box_config(false);
@@ -2154,18 +2187,7 @@ mod tests {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
         };
-        let runtime = RuntimeImpl::new(options).expect("Failed to create runtime");
-        (runtime, temp_dir)
-    }
-
-    fn create_test_runtime_without_host_preflight() -> (SharedRuntimeImpl, TempDir) {
-        let temp_dir = TempDir::new_in("/tmp").expect("Failed to create temp dir");
-        let options = BoxliteOptions {
-            home_dir: temp_dir.path().to_path_buf(),
-            image_registries: vec![],
-        };
-        let runtime = RuntimeImpl::initialize(options, ExperimentalFeatures::default())
-            .expect("Failed to create test runtime");
+        let runtime = RuntimeImpl::new_for_test(options).expect("Failed to create runtime");
         (runtime, temp_dir)
     }
 
@@ -3314,7 +3336,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_import_after_shutdown_returns_stopped_before_archive_validation() {
-        let (runtime, dir) = create_test_runtime_without_host_preflight();
+        let (runtime, dir) = create_test_runtime();
         runtime.shutdown_token.cancel();
 
         let result = runtime

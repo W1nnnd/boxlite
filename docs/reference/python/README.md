@@ -1,11 +1,11 @@
-# Python SDK API Reference
+# Python SDK API reference
 
 Complete API reference for the BoxLite Python SDK.
 
 **Python:** 3.10+
 **Platforms:** macOS (Apple Silicon), Linux (x86_64, ARM64)
 
-## Table of Contents
+## Table of contents
 
 - [Runtime Management](#runtime-management)
 - [Box Handle](#box-handle)
@@ -20,7 +20,7 @@ Complete API reference for the BoxLite Python SDK.
 
 ---
 
-## Runtime Management
+## Runtime management
 
 ### `boxlite.Boxlite`
 
@@ -30,14 +30,14 @@ The main runtime for creating and managing boxes.
 from boxlite import Boxlite, Options, BoxOptions, ImageRegistry
 ```
 
-#### Class Methods
+#### Class methods
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `default()` | `() -> Boxlite` | Create runtime with default settings (`~/.boxlite`) |
 | `__init__()` | `(options: Options) -> Boxlite` | Create runtime with custom options |
 
-#### Instance Methods
+#### Instance methods
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
@@ -128,15 +128,16 @@ Configuration options for creating a box.
 | `image` | `str` | Required | OCI image URI (e.g., `"python:slim"`, `"alpine:latest"`) |
 | `cpus` | `int` | `1` | Number of CPU cores (1 to host CPU count) |
 | `memory_mib` | `int` | `512` | Memory limit in MiB (128-65536) |
-| `disk_size_gb` | `int \| None` | `None` | Persistent disk size in GB (None = ephemeral) |
+| `disk_size_gb` | `int \| None` | `None` | Container disk size in GB, never smaller than the image (None = image size) |
 | `working_dir` | `str` | `"/root"` | Working directory inside container |
 | `env` | `List[Tuple[str, str]]` | `[]` | Environment variables as (key, value) pairs |
 | `volumes` | `List[Tuple \| Dict]` | `[]` | Volume mounts; tuple = host bind, dict = `managed_volume` or `host_path` |
 | `network` | `NetworkSpec \| None` | `None` | Structured network configuration. Omit for default enabled networking. |
 | `ports` | `List[Tuple \| Dict]` | `[]` | Local TCP forwarding; omit `host_port` in a dict for automatic allocation |
-| `secrets` | `List[Secret]` | `[]` | Outbound HTTP(S) secret substitution rules |
+| `secrets` | `List[Secret]` | `[]` | Outbound HTTPS secret substitution rules |
 | `advanced` | `AdvancedBoxOptions \| None` | `None` | Expert-only options, including `capabilities.add` and `capabilities.drop` |
-| `auto_remove` | `bool` | `True` | Auto cleanup when stopped |
+| `auto_delete` | `int \| None` | `None` | `0` keeps the box after stop; above `0`, a REST runtime deletes it that many seconds after stop and a local runtime at stop. `None` keeps the runtime's default (`auto_remove` locally) |
+| `auto_remove` | `bool` | `True` | Deprecated: use `auto_delete`. Auto cleanup when stopped |
 | `detach` | `bool` | `False` | Survive parent process exit |
 
 Capability policy is intentionally nested with the other expert-only options:
@@ -171,9 +172,15 @@ network = NetworkSpec(
 | `mode` | `str` | Required | `"enabled"` or `"disabled"` |
 | `allow_net` | `List[str]` | `[]` | Outbound allowlist used only when `mode="enabled"` |
 
-`mode="disabled"` removes the guest network interface entirely.
+A host matched by a configured `Secret` is additionally reachable on port 443
+without a rule of its own, so `allow_net` is not the only egress gate. The
+connection is dialed by name, and under a non-empty `allow_net` an answer in a
+private, loopback or CGNAT range is refused unless an IP or CIDR rule covers it.
 
-#### Volume Mount Format
+`mode="disabled"` removes the guest network interface entirely. No secret makes
+a host reachable in that mode — there is no network to reach it over.
+
+#### Volume mount format
 
 A mount has exactly one origin. A tuple is always a host bind:
 
@@ -198,7 +205,7 @@ volumes=[
 Managed volumes require a REST runtime; host binds are local-runtime only.
 `read_only` is rejected on a managed mount - only host binds may be read-only.
 
-#### Port Forwarding Format
+#### Port forwarding format
 
 ```python
 ports=[
@@ -211,7 +218,7 @@ ports=[
 Port publication is local-only and TCP-only. For portable local/remote access,
 use `box.network.tunnel(port)`; each returned tunnel is one-shot.
 
-#### Secret Format
+#### Secret format
 
 ```python
 from boxlite import Secret
@@ -226,9 +233,16 @@ secrets=[
 ]
 ```
 
+Each host a secret matches becomes reachable on port 443 under a non-empty
+`allow_net` without a rule of its own — a secret is an egress grant as well as
+a credential. It is a by-name dial like any hostname rule, so a host answering
+with a private, loopback or CGNAT address is still refused unless an IP or CIDR
+rule covers that range. Those hosts on port 80, on any other port, or over UDP
+are governed by `allow_net` alone.
+
 ---
 
-## Box Handle
+## Box handle
 
 ### `boxlite.Box`
 
@@ -249,7 +263,6 @@ Handle to a running or stopped box.
 | `exec()` | `(cmd, args, env, tty) -> Execution` | Execute command (async) |
 | `attach()` | `(execution_id=None, stdin=True) -> Execution` | Follow a running session (async) |
 | `stop()` | `() -> None` | Stop the box gracefully (async) |
-| `remove()` | `() -> None` | Delete box and its data (async) |
 | `info()` | `async () -> BoxInfo` | Get box metadata |
 | `metrics()` | `() -> BoxMetrics` | Get resource usage metrics (async) |
 
@@ -276,7 +289,7 @@ Metadata about a box.
 |-------|------|-------------|
 | `id` | `str` | Unique box identifier (ULID) |
 | `name` | `str \| None` | Optional user-assigned name |
-| `state` | `BoxStateInfo` | Runtime state with `status`, `running`, and nullable `pid` fields |
+| `state` | `BoxStateInfo` | Runtime state with `status`, `running`, and nullable `pid` and `exit_code` fields. `exit_code` is how the main command ended — its own code, or `128 + n` when a signal ended it; stopping a box signals that command, so a stop is recorded here too; `0` is a real value, so test for `None` rather than falsiness |
 | `created_at` | `str` | ISO 8601 creation timestamp |
 | `started_at` | `str \| None` | Time when the box most recently entered `Running` (RFC 3339); `None` if not recorded or unavailable over REST |
 | `last_activity_at` | `str \| None` | Time the box was last active (RFC 3339), the clock AutoStop measures idleness against; `None` for a local box, which records no activity |
@@ -321,7 +334,7 @@ Detailed state information for a box.
 
 ---
 
-## Network Tunnels
+## Network tunnels
 
 Both `boxlite.Box` and `boxlite.SimpleBox` expose `box.network`.
 
@@ -355,6 +368,8 @@ Both `boxlite.Box` and `boxlite.SimpleBox` expose `box.git`. `scope` is
 | Configure user | `await box.git.configure_user(name, email, scope=None, path=None)` | Set `user.name` and `user.email` |
 | Set config | `await box.git.set_config(key, value, scope=None, path=None)` | Write a git config value |
 | Get config | `await box.git.get_config(key, scope=None, path=None) -> str` | Read a git config value |
+| Status | `await box.git.status(path) -> GitStatus` | Structured working-tree status |
+| Branches | `await box.git.branches(path) -> GitBranches` | Local branches plus the current one |
 
 ```python
 await box.git.configure_user("BoxLite Bot", "bot@boxlite.ai")
@@ -362,14 +377,26 @@ await box.git.set_config(
     "core.autocrlf", "input", scope="local", path="/workspace/repo"
 )
 email = await box.git.get_config("user.email", scope="local", path="/workspace/repo")
+
+st = await box.git.status("/workspace/repo")
+print(st.current_branch, st.ahead, st.behind, [f.path for f in st.file_status])
+b = await box.git.branches("/workspace/repo")
+print(b.current, b.names)
 ```
 
 Synchronous wrappers (`SyncBox.git`, `SyncSimpleBox.git`) expose the same
 operations without `await`.
 
+`GitStatus` fields: `current_branch` (`None` when detached), `upstream`,
+`ahead`, `behind`, `branch_published`, `head_commit` (`None` on an unborn
+branch), `file_status: list[GitFileStatus]` (empty when clean).
+`GitFileStatus` fields: `path`, `orig_path`, `index_status`,
+`worktree_status` (porcelain v2 XY codes), `staged`, `untracked`.
+`GitBranches` fields: `current`, `names`.
+
 ---
 
-## Command Execution
+## Command execution
 
 ### `boxlite.Execution`
 
@@ -462,7 +489,7 @@ Result of a completed execution.
 
 ---
 
-## Box Types
+## Box types
 
 ### `boxlite.SimpleBox`
 
@@ -590,7 +617,7 @@ from boxlite import BrowserBox, BrowserBoxOptions
 | `memory` | `int` | `2048` | Memory in MiB |
 | `cpu` | `int` | `2` | Number of CPU cores |
 
-#### Browser CDP Ports
+#### Browser CDP ports
 
 | Browser | Port |
 |---------|------|
@@ -640,7 +667,7 @@ ComputerBox(
 )
 ```
 
-#### Mouse Methods
+#### Mouse methods
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
@@ -653,14 +680,14 @@ ComputerBox(
 | `left_click_drag()` | `(start_x, start_y, end_x, end_y) -> None` | Drag from start to end (async) |
 | `cursor_position()` | `() -> Tuple[int, int]` | Get current cursor (x, y) (async) |
 
-#### Keyboard Methods
+#### Keyboard methods
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `type()` | `(text: str) -> None` | Type text characters (async) |
 | `key()` | `(text: str) -> None` | Press key or key combination (async) |
 
-##### Key Syntax Reference
+##### Key syntax reference
 
 The `key()` method uses **xdotool key syntax**:
 
@@ -685,7 +712,7 @@ await computer.key("alt+Tab")       # Switch window
 await computer.key("ctrl+a Delete") # Select all and delete
 ```
 
-#### Display Methods
+#### Display methods
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
@@ -694,7 +721,7 @@ await computer.key("ctrl+a Delete") # Select all and delete
 | `scroll()` | `(x, y, direction, amount=3) -> None` | Scroll at position (async) |
 | `get_screen_size()` | `() -> Tuple[int, int]` | Get screen dimensions (async) |
 
-##### Screenshot Return Format
+##### Screenshot return format
 
 ```python
 {
@@ -705,7 +732,7 @@ await computer.key("ctrl+a Delete") # Select all and delete
 }
 ```
 
-##### Scroll Directions
+##### Scroll directions
 
 | Direction | Description |
 |-----------|-------------|
@@ -767,7 +794,7 @@ InteractiveBox(
 | `shell` | `str` | `"/bin/sh"` | Shell to run |
 | `tty` | `bool \| None` | `None` | TTY mode (see below) |
 
-##### TTY Mode
+##### TTY mode
 
 | Value | Behavior |
 |-------|----------|
@@ -802,7 +829,7 @@ Synchronous wrappers using greenlet fiber switching. Requires `pip install boxli
 from boxlite import SyncBoxlite, SyncBox, SyncSimpleBox, SyncCodeBox
 ```
 
-### When to Use
+### When to use
 
 | Use Case | API |
 |----------|-----|
@@ -812,7 +839,7 @@ from boxlite import SyncBoxlite, SyncBox, SyncSimpleBox, SyncCodeBox
 | REPL/interactive use | Sync API |
 | Inside async functions | Async API only |
 
-### Comparison Table
+### Comparison table
 
 | Async API | Sync API | Notes |
 |-----------|----------|-------|
@@ -871,15 +898,15 @@ The sync API uses greenlet fiber switching:
 
 ---
 
-## Error Types
+## Error types
 
 ```python
 from boxlite import BoxliteError, ExecError, TimeoutError, ParseError
 ```
 
-### Exception Hierarchy
+### Exception hierarchy
 
-```
+```text
 BoxliteError (base)
 ├── ExecError       # Command execution failed
 ├── TimeoutError    # Operation timed out
@@ -1002,9 +1029,9 @@ Default values used by BoxLite.
 
 ---
 
-## See Also
+## See also
 
 - [Python SDK README](../../../sdks/python/README.md) - Quick start and examples
 - [Getting Started Guide](../../getting-started/quickstart-python.md) - Installation
-- [Configuration Reference](../README.md#configuration-reference) - BoxOptions details
-- [Error Codes](../README.md#error-codes--handling) - Error handling
+- [Configuration Reference](../configuration.md) - BoxOptions details
+- [Error Codes](../errors.md) - Error handling

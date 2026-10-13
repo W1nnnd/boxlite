@@ -45,6 +45,7 @@ import, images, and runtime-wide metrics. They are intentionally absent below;
 | [Hosted BoxLite-compatible API](#hosted-boxlite-compatible-api)           | `apps/api`                   | `/api/v1`                                                                            | `3000`                   |
 | [Runner API](#runner-api)                                                 | `apps/runner`                | `/`                                                                                  | `3003`                   |
 | [Preview proxy API](#preview-proxy-api)                                   | `apps/proxy`                 | `proxy.<domain>`, `<port>-<box>.proxy.<domain>`                                      | `4000`                   |
+| [Registry proxy API](#registry-proxy-api)                                 | `apps/image-service`         | `/v2`                                                                                | `4100`                   |
 | [Telemetry collector API](#telemetry-collector-api)                       | `apps/otel-collector`        | OTLP/HTTP and health listeners                                                       | `4318`, `13133`, `13132` |
 | [Local development stack](#local-development-stack)                       | `apps/infra-local`           | `http://localhost:28080`                                                             | local host ports only    |
 | [Container-based local environment](#container-based-local-environment)   | `apps/scripts`               | containers on `5556`, `5432`, `6379`, `5001`; apps on `3000`, `3001`, `4000`, `8080` | local host ports only    |
@@ -84,7 +85,7 @@ serves and the events it emits are catalogued below alongside its routes.
 </details>
 
 <details>
-<summary><b>Users and authentication</b> · 10 routes</summary>
+<summary><b>Users and authentication</b> · 12 routes</summary>
 
 | Method   | Path                                                     | What it does                                   |
 | -------- | -------------------------------------------------------- | ---------------------------------------------- |
@@ -98,17 +99,20 @@ serves and the events it emits are catalogued below alongside its routes.
 | `DELETE` | `/api/users/linked-accounts/{provider}/{providerUserId}` | Unlinks an external account.                   |
 | `POST`   | `/api/users/mfa/sms/enroll`                              | Enrolls the user in SMS MFA.                   |
 | `GET`    | `/api/auth/end-session`                                  | Starts OIDC RP-initiated logout.               |
+| `POST`   | `/api/auth/link/adopt`                                   | Moves a linked account's data for the Action.  |
+| `GET`    | `/api/auth/link/status`                                  | Tells the Action whether BoxLite knows a user. |
 
 </details>
 
 <details>
-<summary><b>Organizations, membership, and invitations</b> · 23 routes</summary>
+<summary><b>Organizations, membership, and invitations</b> · 24 routes</summary>
 
 | Method   | Path                                                                     | What it does                                             |
 | -------- | ------------------------------------------------------------------------ | -------------------------------------------------------- |
 | `GET`    | `/api/organizations`                                                     | Lists organizations available to the caller.             |
 | `POST`   | `/api/organizations`                                                     | Creates an organization.                                 |
 | `GET`    | `/api/organizations/{organizationId}`                                    | Gets an organization by ID.                              |
+| `GET`    | `/api/organizations/{organizationId}/referral-code`                      | Gets or initializes the organization's invitation code. |
 | `GET`    | `/api/organizations/{organizationId}/concurrency`                        | Gets a bounded concurrency timeline from usage periods.  |
 | `DELETE` | `/api/organizations/{organizationId}`                                    | Deletes an organization.                                 |
 | `PATCH`  | `/api/organizations/{organizationId}/name`                               | Changes an organization's name.                          |
@@ -173,6 +177,7 @@ serves and the events it emits are catalogued below alongside its routes.
 | `POST` | `/api/box/{boxIdOrName}/ports/{port}/signed-preview-url/{token}/expire` | Expires a signed preview URL token.                   |
 | `GET`  | `/api/box/{boxId}/toolbox-proxy-url`                                    | Returns the box toolbox proxy URL.                    |
 | `GET`  | `/api/preview/{boxId}/public`                                           | Reports whether a box is publicly reachable.          |
+| `GET`  | `/api/preview/{boxId}/tunnels/{port}`                                   | Checks an active public tunnel for the proxy.          |
 | `GET`  | `/api/preview/{boxId}/validate/{authToken}`                             | Validates a box preview authentication token.         |
 | `GET`  | `/api/preview/{boxId}/access`                                           | Checks whether the caller may preview a box.          |
 | `GET`  | `/api/preview/{signedPreviewToken}/{port}/box-id`                       | Resolves a signed preview token and port to a box ID. |
@@ -369,7 +374,7 @@ organization authorization; identity discovery at `GET /api/v1/me` can return
 </details>
 
 <details>
-<summary><b>Execution, files, metrics, and networking</b> · 10 routes</summary>
+<summary><b>Execution, files, metrics, and networking</b> · 11 routes</summary>
 
 | Method   | Path                                                          | What it does                                            |
 | -------- | ------------------------------------------------------------- | ------------------------------------------------------- |
@@ -383,6 +388,7 @@ organization authorization; identity discovery at `GET /api/v1/me` can return
 | `GET`    | `/api/v1[/{prefix}]/boxes/{boxId}/files?path={path}`          | Downloads a box path as a tar stream.                   |
 | `GET`    | `/api/v1[/{prefix}]/boxes/{boxId}/metrics`                    | Returns metrics for one box without marking it active.  |
 | `POST`   | `/api/v1[/{prefix}]/boxes/{boxId}/network/tunnel?port={port}` | Returns the runner tunnel URI for a guest TCP port.     |
+| `PUT`    | `/api/v1[/{prefix}]/boxes/{boxId}/network/inbound`            | Makes a box public or private (needs `write:boxes`).    |
 
 The exec, signal, resize, files, and metrics handlers are registered as
 catch-all reverse proxies to the box's assigned runner; the methods shown are
@@ -471,7 +477,8 @@ environment variable, required)
 The proxy is host-routed: a host whose first label parses as `<port>-<box>`
 selects the preview forwarding paths, and any other host serves the base-host
 utility routes. The preview-warning acceptance route is handled before host
-routing, so it works on every host.
+routing, so it works on every host. How the proxy authenticates these requests
+and tunnels them to guest ports is in [`proxy/README.md`](./proxy/README.md).
 
 <details>
 <summary><b>Proxy routes</b> · 5 routes</summary>
@@ -483,6 +490,34 @@ routing, so it works on every host.
 | `POST`    | `<any host>/accept-boxlite-preview-warning?redirect={url}` | Records preview-warning acceptance and redirects the browser.                                    |
 | `ANY`     | `<port>-<box>.proxy.<domain>/{path...}`                    | Reverse-proxies HTTP and WebSocket traffic to the selected box port after preview access checks. |
 | `CONNECT` | `<port>-<box>.proxy.<domain>`                              | Opens a bidirectional TCP tunnel through the runner; allowed for public boxes only.              |
+
+</details>
+
+## Registry proxy API
+
+**Service:** `apps/image-service` (binary `cmd/registry-proxy`) · **Base path:**
+`/v2` · **Port:** `4100` in deployments (`REGISTRY_PROXY_PORT` environment
+variable) · **Reached:** from inside the stage's network only, at its own Cloud
+Run address over HTTP/2
+
+The pull half of the OCI distribution protocol, served so a runner can fetch an
+image whose registry credentials only the platform holds. The organization and
+the upstream registry ride in the repository name — `<org>/<host>/<repo…>` —
+because one proxy serves every registry and the path is what says which. A
+manifest is relayed byte for byte and a blob is streamed, so the digest a client
+verifies still covers what the upstream served. How callers are authenticated,
+which upstreams are reachable, and how redirects are judged is in
+[`image-service/README.md`](./image-service/README.md).
+
+<details>
+<summary><b>Registry proxy routes</b> · 4 routes</summary>
+
+| Method       | Path                                                  | What it does                                                                             |
+| ------------ | ----------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `GET`        | `/health`                                             | Reports registry proxy health and version.                                               |
+| `GET` `HEAD` | `/v2/`                                                | The distribution version check; answers an unauthenticated caller with a Basic challenge. |
+| `GET` `HEAD` | `/v2/{org}/{host}/{repository...}/manifests/{ref}`    | Relays the upstream manifest unmodified, with its digest and media type.                 |
+| `GET` `HEAD` | `/v2/{org}/{host}/{repository...}/blobs/{digest}`     | Streams the upstream blob, following a registry's redirect to a permitted address.        |
 
 </details>
 
@@ -582,14 +617,15 @@ a separate environment — see
 </details>
 
 <details>
-<summary><b>Application processes</b> · 4 processes</summary>
+<summary><b>Application processes</b> · 5 processes</summary>
 
-| Process     | Host port | Interface                                                                  |
-| ----------- | --------- | -------------------------------------------------------------------------- |
-| `api`       | `3001`    | Control-plane and hosted BoxLite-compatible APIs; probed at `/api/health`. |
-| `dashboard` | `3000`    | Vite dev server for the dashboard app.                                     |
-| `proxy`     | `4000`    | Preview proxy API (`PROXY_PORT`).                                          |
-| `runner`    | `3003`    | Runner API (`API_PORT`).                                                   |
+| Process          | Host port | Interface                                                                  |
+| ---------------- | --------- | -------------------------------------------------------------------------- |
+| `api`            | `3001`    | Control-plane and hosted BoxLite-compatible APIs; probed at `/api/health`. |
+| `dashboard`      | `3000`    | Vite dev server for the dashboard app.                                     |
+| `proxy`          | `4000`    | Preview proxy API (`PROXY_PORT`).                                          |
+| `registry-proxy` | `4100`    | Registry proxy API (`REGISTRY_PROXY_PORT`); probed at `/health`.           |
+| `runner`         | `3003`    | Runner API (`API_PORT`).                                                   |
 
 The local API listens on `3001` rather than the deployed `3000`, which the
 dashboard dev server uses; `BOXLITE_LOCAL_API_PORT` overrides it. This stack
@@ -631,9 +667,9 @@ container.
 | `proxy`     | `4000`    | Preview proxy API.                                          |
 | `runner`    | `8080`    | Runner API, left on the in-code default rather than `3003`. |
 
-These are the same four projects the boxed stack serves, on the same `3000`,
-`3001`, and `4000` host ports, so the two local environments cannot run at the
-same time.
+These are four of the five projects the boxed stack serves — all but the
+registry proxy — on the same `3000`, `3001`, and `4000` host ports, so the two
+local environments cannot run at the same time.
 
 </details>
 

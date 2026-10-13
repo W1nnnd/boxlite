@@ -102,9 +102,11 @@ servers:
         default: api.boxlite.ai
       basePath:
         description: |
-          Deployment-defined hostpath prefix. Empty for local servers
-          (`boxlite serve` at `http://localhost:8100/v1/…`); typically
-          `/api` for cloud deployments (`https://api.boxlite.ai/api/v1/…`).
+          Deployment-defined hostpath prefix. Empty on every deployment:
+          `boxlite serve` answers at `http://localhost:8100/v1/…` and a cloud
+          stage at `https://api.boxlite.ai/v1/…`. Cloud stages also still
+          answer the older `/api` form, which is what clients configured before
+          the control plane had a hostname of its own hold.
         default: ""
 
 # ---------------------------------------------------------------------------
@@ -976,6 +978,9 @@ paths:
         Downloads files from the specified path inside the container
         as a tar archive. The box must be running.
 
+        A `path` ending in `/.` (`docker cp`'s spelling) asks for a
+        directory's contents rather than the directory itself.
+
         Transfer operates on the container's root filesystem. A source at or
         under a mount inside the container, or a directory containing one, is
         rejected with `400` — the archive would carry the underlying files
@@ -985,7 +990,9 @@ paths:
         - name: path
           in: query
           required: true
-          description: Source path inside the container
+          description: |
+            Source path inside the container. End a directory with `/.` to
+            download its contents rather than the directory itself.
           schema:
             type: string
           example: /app/output
@@ -1031,12 +1038,16 @@ paths:
         host upgrades each accepted `CONNECT` into one connection to
         the in-box service. `CONNECT` is a transport handshake on the
         URI's host, not an operation of this API.
+
+        Returns 409 while the box's inbound access is `disabled`. Enable it
+        with `network.inbound.mode` at create, or later with
+        `PUT /{prefix}/boxes/{box_id}/network/inbound`.
       tags: [Network]
       parameters:
         - name: port
           in: query
           required: true
-          description: TCP port the service listens on inside the box
+          description: TCP port the service listens on inside the box; terminal port 22222 is reserved
           schema:
             type: integer
             minimum: 1
@@ -1049,6 +1060,44 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TunnelDescriptor"
+        "400":
+          $ref: "#/components/responses/BadRequestError"
+        "404":
+          $ref: "#/components/responses/NotFoundError"
+        "409":
+          $ref: "#/components/responses/ConflictError"
+
+  /{prefix}/boxes/{box_id}/network/inbound:
+    parameters:
+      - $ref: "#/components/parameters/prefix"
+      - $ref: "#/components/parameters/boxId"
+    put:
+      operationId: updateInboundNetwork
+      summary: Change a box's inbound access
+      description: |
+        Makes an existing box public (`enabled`) or private (`disabled`),
+        the policy `network.inbound` sets at create. `enabled` makes the
+        box's services reachable through the remote proxy without
+        authentication. `prepareTunnel` follows the new mode at once; the
+        proxy applies it to new connections once its visibility cache
+        expires, and does not close connections already open.
+
+        Servers that support this advertise
+        `capabilities.inbound_update_enabled` in `GET /config`.
+      tags: [Network]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InboundNetworkSpec"
+      responses:
+        "200":
+          description: The box's inbound access after the change
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboundNetworkSpec"
         "400":
           $ref: "#/components/responses/BadRequestError"
         "404":
@@ -1528,6 +1577,10 @@ components:
               type: boolean
               description: Whether box export is supported
               example: true
+            inbound_update_enabled:
+              type: boolean
+              description: Whether `PUT /{prefix}/boxes/{box_id}/network/inbound` is supported
+              example: true
             idempotency_key_lifetime:
               type: string
               description: How long idempotency keys are retained (ISO 8601 duration)
@@ -1789,6 +1842,32 @@ components:
           type: boolean
           default: true
           description: Whether the box automatically resumes when accessed after AutoStop
+        exit_code:
+          type: integer
+          description: |
+            How the box's main command ended, present once the box has
+            stopped and the runtime recorded it. A command that exited on its
+            own reports its own code; one ended by a signal reports
+            `128 + n`. Stopping a box signals that command — `SIGTERM`, then
+            `SIGKILL` after a grace period — so a stop is recorded here too:
+            the command's own code when it handles `SIGTERM`, and `137`
+            when it does not. Absent while the box is running, because
+            starting one clears it, and absent when nothing was recorded: a
+            box that never reached its command, or one whose exit went
+            unobserved.
+
+            `0` is a real value here: it is how a command that succeeded is
+            told apart from one that did not. Absence, not `0`, is what
+            means "no exit code recorded", so a client must distinguish the
+            missing field from a zero one.
+
+            A server may leave it out of any response other than a direct
+            read of one box — listing boxes, and the replies to create, start,
+            stop, clone and import — because the code lives with the runner
+            that owns the box, and fetching it per box does not scale to a
+            list. So absence in those responses says nothing either way: read
+            the box itself to find out.
+          example: 137
 
     BoxStatus:
       type: string
@@ -1889,12 +1968,18 @@ components:
             $ref: "#/components/schemas/VolumeSpec"
         network:
           $ref: "#/components/schemas/NetworkSpec"
+          description: |
+            Optional network policy. Omitting `network` defaults inbound
+            service access to `disabled` (private).
+          default:
+            inbound:
+              mode: disabled
         secrets:
           type: array
           items:
             $ref: "#/components/schemas/SecretSpec"
           description: |
-            Secret placeholder rules for outbound HTTP(S) requests.
+            Secret placeholder rules for outbound HTTPS requests.
             Matching requests replace `placeholder` with `value` on the host side.
         detach:
           type: boolean
@@ -1913,7 +1998,12 @@ components:
           type: integer
           minimum: 0
           default: 900
-          description: Idle time in seconds before AutoStop; 0 disables AutoStop
+          description: |
+            Idle time in seconds before AutoStop; 0 disables AutoStop. A floor
+            on non-zero values is vendor-specific — boxlite cloud rejects
+            anything below 60, because a shorter window is outrun by the
+            interval at which its proxy renews the idle timer; a single-tenant
+            server sweeping on its own timer has no such floor.
         auto_delete:
           type: integer
           minimum: 0
@@ -2078,6 +2168,12 @@ components:
           $ref: "#/components/schemas/OutboundNetworkSpec"
         inbound:
           $ref: "#/components/schemas/InboundNetworkSpec"
+          description: |
+            Optional inbound service access policy. Omission means
+            `mode=disabled` (private), including for legacy flat network
+            requests. Send `mode=enabled` to make the box public.
+          default:
+            mode: disabled
         mode:
           deprecated: true
           type: string
@@ -2112,6 +2208,11 @@ components:
             Optional outbound allowlist used only when `mode=enabled`.
             Empty or omitted means full outbound access.
             Supports hostnames, wildcard hostnames, IPs, and CIDRs.
+            A host matched by a configured secret is additionally reachable on
+            port 443 without a rule of its own, so this is not the only egress
+            gate. That connection is dialed by name, and under a non-empty
+            list an answer in a private, loopback or CGNAT range is refused
+            unless an IP or CIDR rule covers it.
 
     InboundNetworkSpec:
       type: object
@@ -2139,7 +2240,7 @@ components:
 
     SecretSpec:
       type: object
-      description: Outbound HTTP(S) secret substitution rule
+      description: Outbound HTTPS secret substitution rule
       required: [name, value]
       properties:
         name:

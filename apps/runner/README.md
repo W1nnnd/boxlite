@@ -1,3 +1,7 @@
+## TL;DR
+
+One runner service manages many BoxLite VMs and exposes their lifecycle, execution, files and telemetry.
+
 # BoxLite Runner
 
 The runner is the Go HTTP server that fronts a single `BoxliteRuntime` (the
@@ -6,12 +10,12 @@ API for SDK clients and the control-plane API. One runner process hosts many
 boxes; each box hosts many executions; each execution can be attached to at
 most one client at a time.
 
-Production deployment runs on bare EC2 (see
-[`apps/infra/sst.config.ts`](../infra/sst.config.ts)), listening on `:3003`
-behind the NestJS API service.
+Cloud deployment runs on Compute Engine or EC2 with nested KVM, listening on `:3003`
+behind the control-plane API. See [infrastructure architecture](../infra/docs/architecture.md)
+and [runner operations](../infra/docs/runners.md).
 
 For the system-wide context (CDN, load balancers, where the runner fits in
-the request path), see [`docs/architecture/README.md`](../../docs/architecture/README.md).
+the request path), see [`apps/README.md`](../README.md).
 
 ---
 
@@ -109,8 +113,13 @@ the in-process TTL caches under `pkg/cache/`.
 `cmd/runner/main.go` brings up the process in this order:
 
 1. **BoxLite runtime** is initialized via `boxlite.NewClient(...)`. This
-   loads the Rust core, opens `~/.boxlite/`, and is the single shared
-   handle to the VM hypervisor.
+   loads the Rust core, opens the BoxLite home, and is the single shared
+   handle to the VM hypervisor. The client resolves the home the way
+   boxlite-core would — `BOXLITE_HOME_DIR`, else `$BOXLITE_HOME`, else
+   `.boxlite` under `$HOME` (or the passwd home when `$HOME` is unset) —
+   passes it to core explicitly, and exposes it as `HomeDir()`, so the
+   rest of the runner (migration staging under `<home>/migrate`) reads the
+   same directory as the runtime.
 2. **Service singletons** are constructed and stashed on the
    `runner.GetInstance(...)` global: `BoxService`, `BackupInfoCache`,
    `ArtifactErrorCache`, `metrics.Collector`. Controllers later read them
@@ -237,12 +246,13 @@ pkg/api/controllers/boxlite_exec_attach.go
    ├─ ManagedExec.MarkConnected()             409 if slot already taken
    └─ runAttachLoop(parentCtx, conn, exec)    4 goroutines, fail-fast cancel
       ├─ conn.SetReadDeadline(now + 45s)      45s = 3 × Ping interval; trips ReadMessage on dead peer
-      ├─ conn.SetPongHandler(reset deadline)  each received Pong pushes deadline forward
+      ├─ conn.SetPongHandler(reset deadline)  each Pong pushes it out — until the loop is cancelled
       ├─ pumpSubscriberChannel() × {1,2}      stdout 0x01 / stderr 0x02 frames (subscribed to ManagedExec broadcaster)
-      ├─ readClientFrames()                   binary → stdin; text JSON → control
+      ├─ readClientFrames()                   binary → stdin; text JSON → control; drains past cancel
       │  └─ handleControlFrame()              resize | signal (whitelist) | stdin_eof
       ├─ runKeepalive()                       WS Ping every 15s
-      └─ (on exec.Done) writeJSONFrame()      sends {"type":"exit",...} + Close
+      ├─ (on exec.Done) writeJSONFrame()      sends {"type":"exit",...} + Close
+      └─ awaitPeerClose(conn, readerDone)     RFC 6455 §5.5.1: hold TCP for the peer's Close, ≤ 5 s
 
 pkg/boxlite/exec_manager.go
 ├─ ExecManager (struct)                       map[id]*ManagedExec + cleanupLoop
@@ -337,6 +347,7 @@ Text JSON {"type":"signal","sig":N}   Text JSON {"type":"exit","exit_code":N}
 Text JSON {"type":"stdin_eof"}        Text JSON {"type":"error","message":"..."}
                                       WS Ping every 15 s           ← keepalive
 WS Pong (auto)                        WS Close on normal exit
+WS Close (the answer to it)
 ```
 
 Notable properties:
@@ -353,9 +364,17 @@ Notable properties:
   sends a WS Ping every 15 seconds, well under any reasonable
   intermediary's idle timeout (CloudFront default 30 s, ALB 60 s,
   Heroku 55 s).
+- **The close is a handshake.** RFC 6455 §5.5.1 lets an endpoint drop the
+  TCP connection only once a Close has been both sent *and received*, so
+  after its own the server waits for the client's — or for the client to
+  drop the socket — bounded at 5 s. Dropping it unilaterally strands any
+  intermediary still relaying the `101`, which an external load balancer
+  reports as a failed upgrade rather than as the clean exit it was.
 - **Single-attach.** A second `/attach` to an already-attached exec
   returns HTTP 409 _before_ the WS upgrade. The client should respect
-  this and surface a "session busy" error rather than retry.
+  this and surface a "session busy" error rather than retry. The slot is
+  held until the close handshake above finishes, so it can outlive the
+  exit frame by up to that bound.
 
 #### Reaping policy
 
@@ -427,8 +446,9 @@ durations, and network counters. All values come from
 `/info` combines:
 
 - A snapshot from `metrics.Collector.Collect(ctx)` — host CPU load
-  average, CPU/mem/disk %, summed allocated CPU/RAM/disk across running
-  boxes, artifact count, started box count.
+  average, CPU/mem %, summed allocated CPU/RAM across running boxes,
+  disk usage of the BoxLite home's filesystem, artifact count, started
+  box count.
 - `runner.InspectRunnerServices(ctx)` — pings the BoxLite runtime with
   a 2 s timeout and reports `boxlite: healthy|<err>`.
 
@@ -476,10 +496,16 @@ independent loops:
   smoothed CPU % without re-sampling on each request.
 - **Allocated resources snapshot** every
   `AllocatedResourcesSnapshotInterval` — queries `Boxlite.ListInfo()`
-  and sums the CPU/RAM/disk allocations across running boxes.
+  and sums the CPU/RAM allocations across running boxes.
 
 `Collect(ctx)` reads the current values with a short timeout and is
-called from both `/info` and the v2 healthcheck.
+called from both `/info` and the v2 healthcheck. Disk numbers come from
+one statfs of the filesystem holding the BoxLite home (`HomeDir()`),
+which is where boxes, images and bases live: `TotalDiskGiB` is its size,
+`DiskUsagePercentage` its use (`df`'s Use%), and `AllocatedDiskGiB` its
+used space (`df`'s Used) — not a sum of the boxes' requested sizes. A
+filesystem reporting zero capacity is an error, so the API never
+receives a `diskGiB` of 0.
 
 ### v2 job poller + executor
 
@@ -579,9 +605,14 @@ Optional features are toggled by env vars:
 - `BOXLITE_API_VERSION=2` — spawn the long-poll + healthcheck loops.
 - `BOXLITE_MAX_SESSION_LIFETIME`, `BOXLITE_RECONNECT_GRACE`,
   `BOXLITE_SHUTDOWN_GRACE` — exec reaping timers.
+- `REGISTRY_PROXY_HOST`, `REGISTRY_PROXY_USERNAME`, `REGISTRY_PROXY_PASSWORD` —
+  pull an image whose registry credentials only the platform holds through the
+  [registry proxy](../image-service/README.md). Used only when all three are set,
+  and a warning names whichever are missing. The password is this runner's own
+  API key. A proxy host also listed in `INSECURE_REGISTRIES` is reached over HTTP.
 
-The runner is normally bootstrapped by the SST EC2 user-data script;
-see `apps/infra/stack/runners.ts:buildRunnerUserData`. For local
+Cloud hosts use the [shared runner boot logic](../infra/mdeploy/stack/runner-boot.ts)
+with cloud-specific providers; the retained AWS stack has its own bootstrap path. For local
 development against the Rust SDK directly, see `boxlite serve` at
 [`src/cli/src/commands/serve/`](../../src/cli/src/commands/serve/)
 (Rust REST server with parity coverage).

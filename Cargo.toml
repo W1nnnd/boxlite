@@ -5,6 +5,8 @@ members = [
     "src/shared",
     "src/guest",
     "src/shim",
+    "src/hypervisor",
+    "src/vmm",
     "src/test-utils",
     "src/deps/bubblewrap-sys",
     "src/deps/e2fsprogs-sys",
@@ -19,12 +21,14 @@ exclude = ["build/tmp", "target", ".venv", "examples/*/.venv"]
 resolver = "2"
 
 [workspace.dependencies]
-boxlite = { path = "src/boxlite", version = "0.10.0" }
-boxlite-shared = { path = "src/shared", version = "0.10.0" }
-bubblewrap-sys = { path = "src/deps/bubblewrap-sys", version = "0.10.0" }
-e2fsprogs-sys = { path = "src/deps/e2fsprogs-sys", version = "0.10.0" }
-libgvproxy-sys = { path = "src/deps/libgvproxy-sys", version = "0.10.0" }
-libkrun-sys = { path = "src/deps/libkrun-sys", version = "0.10.0" }
+boxlite = { path = "src/boxlite", version = "0.10.6" }
+boxlite-shared = { path = "src/shared", version = "0.10.6" }
+boxlite-hypervisor = { path = "src/hypervisor", version = "0.10.6" }
+boxlite-vmm = { path = "src/vmm", version = "0.10.6" }
+bubblewrap-sys = { path = "src/deps/bubblewrap-sys", version = "0.10.6" }
+e2fsprogs-sys = { path = "src/deps/e2fsprogs-sys", version = "0.10.6" }
+libgvproxy-sys = { path = "src/deps/libgvproxy-sys", version = "0.10.6" }
+libkrun-sys = { path = "src/deps/libkrun-sys", version = "0.10.6" }
 
 [patch.crates-io]
 # Pull in youki PR #3504 (split intermediate/init readiness channels) which
@@ -33,8 +37,21 @@ libkrun-sys = { path = "src/deps/libkrun-sys", version = "0.10.0" }
 libcontainer = { git = "https://github.com/youki-dev/youki", rev = "4b2f0e00a4a11107f3a338c21c17407d2f664ec9" }
 
 [workspace.package]
-version = "0.10.0"
+version = "0.10.6"
 edition = "2024"
 authors = ["Dorian Zheng <https://github.com/dorianzheng>"]
 license = "Apache-2.0"
 rust-version = "1.88"
+
+# Cargo's recommended dev profile: keep file:line backtraces, drop full
+# DWARF (and all dependency debuginfo). Full debugger symbols: --profile debugging.
+# https://doc.rust-lang.org/cargo/guide/build-performance.html
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.debugging]
+inherits = "dev"
+debug = true

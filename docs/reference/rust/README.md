@@ -1,4 +1,4 @@
-# Rust API Reference
+# Rust API reference
 
 Complete API reference for the BoxLite Rust SDK.
 
@@ -7,11 +7,11 @@ Complete API reference for the BoxLite Rust SDK.
 The Rust SDK is the core implementation of BoxLite. It provides async-first APIs built on Tokio for creating and managing isolated VM environments.
 
 **Crate**: `boxlite`
-**Repository**: [github.com/anthropics/boxlite](https://github.com/anthropics/boxlite)
+**Repository**: [github.com/boxlite-ai/boxlite](https://github.com/boxlite-ai/boxlite)
 
 ---
 
-## Table of Contents
+## Table of contents
 
 - [Runtime Management](#runtime-management)
   - [BoxliteRuntime](#boxliteruntime)
@@ -31,9 +31,10 @@ The Rust SDK is the core implementation of BoxLite. It provides async-first APIs
   - [ExecResult](#execresult)
 - [Box Configuration](#box-configuration)
   - [BoxOptions](#boxoptions)
-  - [AdvancedBoxOptions](#advancedoptions)
+  - [AdvancedBoxOptions](#advancedboxoptions)
   - [RootfsSpec](#rootfsspec)
   - [VolumeSpec](#volumespec)
+  - [MountSpec](#mountspec)
   - [NetworkSpec](#networkspec)
   - [NetworkRateLimit](#networkratelimit)
   - [PortSpec](#portspec)
@@ -55,7 +56,7 @@ The Rust SDK is the core implementation of BoxLite. It provides async-first APIs
 
 ---
 
-## Runtime Management
+## Runtime management
 
 ### BoxliteRuntime
 
@@ -176,7 +177,7 @@ let options = BoxliteOptions {
 
 ---
 
-## Box Handle
+## Box handle
 
 ### LiteBox
 
@@ -188,6 +189,56 @@ pub struct LiteBox {
 }
 ```
 
+#### SSH control
+
+`LiteBox::ssh()` returns an owned, cloneable `SshHandle` without starting the box.
+Only `configure()` uses the implicit-start guard of exec, metrics, and file
+copying. `Configured` and `Stopped` boxes using image defaults can start implicitly.
+With an explicit `BoxOptions.cmd` or `entrypoint`, configuration returns
+`InvalidState` in these states; call `start()` first. `status()` and `disable()`
+never start the VM or main command: valid `Configured` and `Stopped` handles return
+disabled status with generation zero and empty address and host identity fields.
+Running handles use the existing guest, including after attach before start or
+runtime recovery. Other lifecycle states return `InvalidState`. These observations
+do not prevent concurrent configuration. The REST backend returns `Unsupported`.
+
+| Method | Signature |
+|--------|-----------|
+| Configure | `async fn configure(&self, config: SshConfig) -> BoxliteResult<SshStatus>` |
+| Query | `async fn status(&self) -> BoxliteResult<SshStatus>` |
+| Disable | `async fn disable(&self) -> BoxliteResult<SshStatus>` |
+
+These types are exported directly from `boxlite`, independently of protobuf:
+
+| Type | Public fields |
+|------|---------------|
+| `SshConfig` | `listen_address: String`, `host_private_key: String`, `accounts: Vec<SshAccount>` |
+| `SshAccount` | `login: String`, `authorized_keys: Vec<String>`, `ca: Option<SshCaConfig>` |
+| `SshCaConfig` | `public_key: String`, `principal: String` |
+| `SshStatus` | `enabled: bool`, `generation: u64`, `listen_address: String`, `host_public_key: String`, `host_key_fingerprint: String` |
+
+Configuration fields are explicit; the runtime neither generates keys nor stores
+configuration nor publishes ports. All types are `Clone + Debug + Send + Sync`;
+configuration Debug output redacts credentials, and status supports `PartialEq + Eq`.
+
+After VM and container startup, each operation has a total 15-second budget:
+the guest's 10-second cleanup limit plus 5 seconds for communication and scheduling.
+Obtaining the SSH interface, connection setup, queueing, and the RPC consume this
+same budget, so delays can leave less than 10 seconds for guest cleanup.
+Runtime shutdown rejects new operations and cancels interface acquisition and RPCs.
+In-progress VM initialization finishes before cancellation is returned, preserving
+recovery of detached boxes; container startup retains its own cancellation.
+Operations are not retried. Cancellation/timeout cannot guarantee
+rollback. Invalidated handles return `Stopped`; drop all references to the old box
+and use `runtime.get()` to obtain a fresh handle for restart. Recovered stopped
+boxes with an explicit main command still require `start()` before `configure()`. Guest
+`InvalidArgument`, `FailedPrecondition`, and `Unimplemented` map to `InvalidArgument`, `InvalidState`, and `Unsupported`; other RPC failures,
+including guest `DeadlineExceeded`, map to `BoxliteError::Rpc` and retain operation
+and gRPC status context. Missing response status is `Internal`.
+
+See the [SSH guide](../../guides/ssh.md) for an implicit-start example,
+validation, reconfiguration, disable, and generation semantics.
+
 #### Methods
 
 | Method | Signature | Description |
@@ -195,8 +246,9 @@ pub struct LiteBox {
 | `id` | `fn id(&self) -> &BoxID` | Get box ID |
 | `name` | `fn name(&self) -> Option<&str>` | Get optional box name |
 | `info` | `async fn info(&self) -> Result<BoxInfo>` | Get box info (no VM init) |
+| `ssh` | `fn ssh(&self) -> SshHandle` | Control local SSH; only configure may implicitly start the box |
 | `network` | `fn network(&self) -> NetworkHandle` | Get box-scoped tunnel operations |
-| `git` | `fn git(&self) -> GitHandle` | Get box-scoped git config operations |
+| `git` | `fn git(&self) -> GitHandle` | Get box-scoped git operations |
 | `start` | `async fn start(&self) -> BoxliteResult<()>` | Start the box |
 | `run` | `async fn run(&self, command: BoxCommand) -> BoxliteResult<Execution>` | Run command |
 | `metrics` | `async fn metrics(&self) -> BoxliteResult<BoxMetrics>` | Get box metrics |
@@ -207,7 +259,8 @@ pub struct LiteBox {
 - `start()` initializes VM for `Configured` or `Stopped` boxes
 - Idempotent: calling on `Running` box is a no-op
 - `run()` implicitly calls `start()` if needed
-- `stop()` terminates VM; box can be restarted
+- `stop()` terminates the VM. With default options a local runtime then removes the box;
+  `auto_delete: Some(0)` keeps it
 
 #### Example
 
@@ -339,12 +392,12 @@ pub enum BoxStatus {
 | `can_remove` | `fn can_remove(&self) -> bool` | True if Configured, Stopped, or Unknown |
 | `can_run` | `fn can_run(&self) -> bool` | True if Configured, Running, or Stopped |
 
-#### State Machine
+#### State machine
 
-```
+```text
 create() → Configured (persisted to DB, no VM)
 start()  → Running (VM initialized)
-stop()   → Stopped (VM terminated, can restart)
+stop()   → Stopped (VM terminated); a local runtime removes it unless auto_delete is Some(0)
 ```
 
 ### BoxState
@@ -372,7 +425,7 @@ pub struct BoxState {
 
 ---
 
-## Network Tunnels
+## Network tunnels
 
 | Operation | Signature | Description |
 |-----------|-----------|-------------|
@@ -408,6 +461,8 @@ or `"system"`; `"local"` requires `path`.
 | Configure user | `async fn configure_user(&self, name, email, scope, path) -> BoxliteResult<()>` | Set `user.name` and `user.email` |
 | Set config | `async fn set_config(&self, key, value, scope, path) -> BoxliteResult<()>` | Write a git config value |
 | Get config | `async fn get_config(&self, key, scope, path) -> BoxliteResult<String>` | Read a git config value |
+| Status | `async fn status(&self, path: &str) -> BoxliteResult<GitStatus>` | Structured working-tree status |
+| Branches | `async fn branches(&self, path: &str) -> BoxliteResult<GitBranches>` | Local branches plus the current one |
 
 ```rust
 let git = litebox.git();
@@ -428,9 +483,24 @@ let email = git
 The handle runs `git config` through the box backend, so the same methods work
 on a local runtime and against a served REST runtime.
 
+`GitStatus` has `current_branch: Option<String>` (`None` when HEAD is
+detached), `upstream`, `ahead`, `behind`, `branch_published` (the upstream
+exists), `head_commit` (`None` on an unborn branch), and
+`file_status: Vec<GitFileStatus>`, empty on a clean tree. Each
+`GitFileStatus` carries `path`, `orig_path` (rename/copy source),
+`index_status` and `worktree_status` (porcelain v2 XY codes), plus
+`is_staged()` and `is_untracked()`. Paths containing spaces or newlines are
+reported verbatim. `GitBranches` has `current` and `names`.
+
+```rust
+let st = litebox.git().status("/workspace/repo").await?;
+println!("{:?} +{} -{}", st.current_branch, st.ahead, st.behind);
+let branches = litebox.git().branches("/workspace/repo").await?;
+```
+
 ---
 
-## Command Execution
+## Command execution
 
 ### BoxCommand
 
@@ -449,7 +519,7 @@ let cmd = BoxCommand::new("python3")
     .tty(true);
 ```
 
-#### Builder Methods
+#### Builder methods
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
@@ -554,7 +624,7 @@ while let Some(line) = stderr.next().await {
 }
 ```
 
-#### Concurrent Reading
+#### Concurrent reading
 
 ```rust
 use futures::StreamExt;
@@ -594,7 +664,7 @@ impl ExecResult {
 
 ---
 
-## Box Configuration
+## Box configuration
 
 ### BoxOptions
 
@@ -623,19 +693,27 @@ pub struct BoxOptions {
     /// Volume mounts
     pub volumes: Vec<VolumeSpec>,
 
+    /// Typed mounts, beside `volumes`
+    pub mounts: Vec<MountSpec>,
+
     /// Network policy, per direction
     pub network: NetworkSpec,
 
     /// Inbound reachability of exposed services
     pub inbound_network: NetworkSpec,
 
-    /// Outbound HTTP(S) secret substitution rules
+    /// Outbound HTTPS secret substitution rules
     pub secrets: Vec<Secret>,
 
     /// Port mappings
     pub ports: Vec<PortSpec>,
 
-    /// Auto-remove box when stopped (default: true)
+    /// Seconds after stop before the box is deleted: `Some(0)` keeps it, and a
+    /// local runtime deletes at stop for any other value. `None` (default) falls
+    /// back to `auto_remove` locally and to the server's policy on REST.
+    pub auto_delete: Option<u32>,
+
+    /// Deprecated: use `auto_delete`. Remove the box when it stops (default: true)
     pub auto_remove: bool,
 
     /// Run independently of parent process (default: false)
@@ -676,8 +754,8 @@ let options = BoxOptions {
         },
         ..Default::default()
     },
-    auto_remove: false,  // Keep box after stop
-    detach: true,        // Run independently
+    auto_delete: Some(0),  // Keep box after stop
+    detach: true,          // Run independently
     ..Default::default()
 };
 ```
@@ -776,6 +854,55 @@ The two origins are not interchangeable across runtimes:
 | `VolumeSpec::managed_volume` | rejected — no volume backend | mounted |
 | `VolumeSpec::bind_mount` | mounted | rejected — the path is the server's, not yours |
 
+### MountSpec
+
+A typed mount for `BoxOptions::mounts`. Where a `VolumeSpec` infers its origin
+from which field is set, a `MountSpec` states it in `mount_type`.
+
+```rust
+pub struct MountSpec {
+    /// `MountType::Volume` or `MountType::Bind`; serialized as `"type"`.
+    pub mount_type: MountType,
+
+    /// A volume id or name for `Volume`, a host path for `Bind`; required by both.
+    pub source: Option<String>,
+
+    /// Mount point inside the box; an absolute path.
+    pub target: String,
+
+    /// Mount as read-only
+    pub read_only: bool,
+
+    /// `Volume` only: a prefix to mount instead of the whole volume.
+    pub sub_path: Option<String>,
+}
+```
+
+```rust
+use boxlite::runtime::options::MountSpec;
+
+let prefix = MountSpec {
+    read_only: true,
+    sub_path: Some("foo/bar".to_string()),
+    ..MountSpec::volume_mount("run42", "/workspace")
+};
+let bind = MountSpec::bind_mount("/tmp/data", "/data");
+```
+
+`MountType` parses from and displays as `"volume"` and `"bind"` exactly. Only
+the Rust `BoxOptions` carries a `MountSpec`; no CLI flag, other SDK or REST
+request does yet.
+`MountSpec::validate` refuses a relative `target`, a missing `source`,
+`sub_path` on a `Bind`, and an empty `sub_path`; create runs it for every mount.
+A runtime refuses the mounts it does not take rather than dropping them; use
+`volumes` where it takes none:
+
+- REST runtimes take no typed mounts yet.
+
+- The local runtime takes no typed mounts yet.
+
+- Importing an archive that carries mounts is not supported yet.
+
 ### NetworkSpec
 
 Guest egress policy — unchanged by the outbound/inbound split.
@@ -789,18 +916,19 @@ pub enum NetworkSpec {
 }
 ```
 
-`allow_net` supports exact hosts, wildcard hosts, IPs, and CIDRs, and restricts both TCP and UDP egress. Hostname rules rely on TLS SNI / HTTP Host inspection, which only TCP carries, so an `allow_net` holding only hostnames denies all UDP egress — add the IP or CIDR to keep UDP open. `Disabled` removes the guest network interface entirely.
+`allow_net` supports exact hosts, wildcard hosts, IPs, and CIDRs, and restricts both TCP and UDP egress. Hostname rules rely on TLS SNI / HTTP Host inspection, which only TCP carries, so an `allow_net` holding only hostnames denies all UDP egress — add the IP or CIDR to keep UDP open. A host matched by a configured `Secret` is additionally reachable on port 443 without a rule of its own, so `allow_net` is not the only egress gate. The connection is dialed by name, and under a non-empty allowlist an answer in a private, loopback or CGNAT range is refused unless an IP or CIDR rule covers it. `Disabled` removes the guest network interface entirely.
 
 The inbound direction — whether services the box exposes are reachable from
 outside it — is the sibling field `BoxOptions::inbound_network`, which reuses
-this same type: `Enabled` = reachable (the default), `Disabled` = private.
-The two directions are independent, so a box may refuse egress while the
-services it exposes stay reachable, or the reverse.
+this same type: `Enabled` = reachable, `Disabled` = private (the default,
+`NetworkSpec::disabled()`). The two directions are independent, so a
+box may refuse egress while the services it exposes stay reachable, or the
+reverse.
 
 ```rust
 let opts = BoxOptions {
     network: NetworkSpec::Disabled,                                  // no egress
-    inbound_network: NetworkSpec::Enabled { allow_net: vec![] },     // still reachable
+    inbound_network: NetworkSpec::Enabled { allow_net: vec![] },     // reachable
     ..Default::default()
 };
 ```
@@ -810,7 +938,7 @@ allowlist yet, so a non-empty value is rejected at create. Inbound is
 controlled by enabled/disabled alone.
 
 Pre-split code needs no change: `network` keeps its name, type and meaning,
-and box configs persisted without `inbound_network` load with it defaulted.
+and box configs persisted without `inbound_network` load with it `Disabled`.
 
 ### NetworkRateLimit
 
@@ -862,7 +990,7 @@ frames rather than slow the guest down. `rx_kbps` is paced the same way on both.
 
 ### Secret
 
-Outbound HTTP(S) secret substitution rule.
+Outbound HTTPS secret substitution rule.
 
 ```rust
 pub struct Secret {
@@ -947,7 +1075,8 @@ pub struct SecurityOptions {
     /// Custom sandbox profile (macOS only)
     pub sandbox_profile: Option<PathBuf>,
 
-    /// Enable network in sandbox (macOS only)
+    /// Network grants of the host-side sandbox (seatbelt on macOS, Landlock on Linux);
+    /// does not disable guest networking
     pub network_enabled: bool,
 }
 ```
@@ -990,7 +1119,7 @@ let security = SecurityOptions::builder()
     .build();
 ```
 
-#### Builder Methods
+#### Builder methods
 
 | Method | Description |
 |--------|-------------|
@@ -1017,7 +1146,7 @@ let security = SecurityOptions::builder()
 | `max_memory_bytes(n)` | RLIMIT_AS |
 | `max_cpu_time_seconds(n)` | RLIMIT_CPU |
 | `sandbox_profile(path)` | macOS sandbox profile |
-| `network_enabled(bool)` | macOS network access |
+| `network_enabled(bool)` | Host sandbox network grants, not guest networking |
 | `build()` | Build SecurityOptions |
 
 ### ResourceLimits
@@ -1095,7 +1224,7 @@ println!("Memory: {:?} bytes", metrics.memory_bytes());
 | `network_tcp_connections` | `Option<u64>` | Active TCP connections |
 | `network_tcp_errors` | `Option<u64>` | TCP connection errors |
 
-#### Stage Timing
+#### Stage timing
 
 | Field | Description |
 |-------|-------------|
@@ -1108,7 +1237,7 @@ println!("Memory: {:?} bytes", metrics.memory_bytes());
 
 ---
 
-## Type Utilities
+## Type utilities
 
 ### Bytes
 
@@ -1185,7 +1314,7 @@ let valid = ContainerID::is_valid("a".repeat(64).as_str());  // true
 
 ---
 
-## Error Types
+## Error types
 
 ### BoxliteError
 
@@ -1257,7 +1386,7 @@ Result type alias for BoxLite operations.
 pub type BoxliteResult<T> = Result<T, BoxliteError>;
 ```
 
-#### Error Handling Example
+#### Error handling example
 
 ```rust
 use boxlite::BoxliteError;
@@ -1272,7 +1401,7 @@ match runtime.create(options, None).await {
 
 ---
 
-## Complete Example
+## Complete example
 
 ```rust
 use boxlite::runtime::{BoxliteRuntime, BoxOptions};
@@ -1344,7 +1473,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-## Thread Safety
+## Thread safety
 
 All public types are `Send + Sync`:
 
@@ -1376,10 +1505,10 @@ for handle in handles {
 
 ---
 
-## See Also
+## See also
 
 - [Getting Started Guide](../../getting-started/README.md)
-- [Architecture Overview](../../architecture/README.md)
-- [Configuration Reference](../README.md)
+- [Concepts](../../concepts/README.md)
+- [Configuration Reference](../configuration.md)
 - [Python SDK Reference](../python/README.md)
 - [Node.js SDK Reference](../nodejs/README.md)

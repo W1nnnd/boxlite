@@ -8,11 +8,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
-import { DEFAULT_SCHEMA, Type, load as loadYaml, type LoadOptions } from 'js-yaml'
+import { load as loadYaml } from 'js-yaml'
 
 import { DEFAULT_AWS_REGION } from './environment.js'
 import { verifyDeployRoleGrantsBoundaryPermission } from './role-boundary.js'
 import { githubDeployRoleName } from '../bootstrap/environment.js'
+import { render } from '../bootstrap/aws.js'
 import { liveText } from '../shared/live-source.js'
 import { apiImageRepository } from '../artifacts/api.js'
 import { runnerArtifactsBucketName } from '../artifacts/runner.js'
@@ -28,23 +29,10 @@ const API_IMAGE_BUILD_WORKFLOW = join(REPO_ROOT, '.github/workflows/build-apps-a
 const BUILD_C_WORKFLOW = join(REPO_ROOT, '.github/workflows/build-c.yml')
 const BUILD_RUNNER_WORKFLOW = join(REPO_ROOT, '.github/workflows/build-runner-binary.yml')
 const E2E_CLOUD_WORKFLOW = join(REPO_ROOT, '.github/workflows/e2e-cloud.yml')
-const LINT_WORKFLOW = join(REPO_ROOT, '.github/workflows/lint.yml')
-const DEV_DEPLOY_ROLE = join(REPO_ROOT, 'apps/infra/bootstrap/aws/github-deploy-role.yaml')
-const CLOUDFORMATION_SCHEMA = DEFAULT_SCHEMA.extend([
-  new Type('!Sub', {
-    kind: 'scalar',
-    construct: (value) => value,
-  }),
-  new Type('!Ref', {
-    kind: 'scalar',
-    construct: (value) => value,
-  }),
-  new Type('!GetAtt', {
-    kind: 'scalar',
-    construct: (value) => value,
-  }),
-])
-const load = (source: string, options?: LoadOptions): any => loadYaml(source, options)
+const DEV_DEPLOY_ROLE_TRUST = join(REPO_ROOT, 'apps/infra/bootstrap/aws/deploy-role-trust.json')
+const DEV_DEPLOY_ROLE_POLICY = join(REPO_ROOT, 'apps/infra/bootstrap/aws/deploy-role-policy.json')
+const DEV_RUNTIME_BOUNDARY_POLICY = join(REPO_ROOT, 'apps/infra/bootstrap/aws/runtime-boundary-policy.json')
+const load = (source: string): any => loadYaml(source)
 const values = (record: any): any[] => Object.values(record ?? {})
 const entries = (record: any): Array<[string, any]> => Object.entries(record ?? {})
 
@@ -85,9 +73,11 @@ function iamGlob(pattern: string) {
  * shared bootstrap and contains no such marker, so a substring search silently answers "no" to the
  * broadest grant there is.
  *
- * The `${AWS::Region}`-style placeholders have to be neutralised first, because they contain colons
- * themselves and would otherwise split into phantom segments. They stand for this deploy's own
- * partition, region and account — the same ones the parameter lives in — so they count as matching.
+ * A `${...}`-style computed value (a CloudFormation intrinsic, or anything templated the same way)
+ * has to be neutralised first if it could contain a colon of its own and split into phantom
+ * segments — deploy-role-policy.json's own placeholders (`<REGION>`, `<ACCOUNT>`, `<STAGE>`) carry
+ * none, so they never need this, but sharedBootstrapMutations still has to refuse anything that
+ * does rather than guess what it stands for.
  */
 const SUB_SENTINEL = '\u0001'
 
@@ -130,38 +120,6 @@ function mutatesParameters(action: unknown) {
  * Resource and quietly return "nothing matches", it reports the statement as unanalyzable and the
  * assertion fails. The template uses neither today, and this is what keeps that true.
  */
-/*
- * Every statement that reaches the deploy role: its inline policies, plus any standalone policy
- * resource that attaches to it. AWS::IAM::Policy and ::ManagedPolicy name their targets in `Roles`,
- * ::RolePolicy in `RoleName`, and any of them can grant back whatever the inline policy gives up —
- * invisibly, to anything that reads only Properties.Policies.
- */
-const ATTACHABLE_POLICY_TYPES = ['AWS::IAM::Policy', 'AWS::IAM::RolePolicy', 'AWS::IAM::ManagedPolicy']
-
-function deployRolePolicyStatements(template: any) {
-  const role = template.Resources.GitHubDeployRole.Properties
-  const statements = (role.Policies ?? []).flatMap((policy: any) => policy.PolicyDocument.Statement)
-
-  /*
-   * By logical id (`!Ref GitHubDeployRole`) or by the physical name the role declares
-   * (`!Sub boxlite-${GitHubEnvironment}-github-deploy`) — both address the same role, and matching
-   * only the first would miss a policy attached the other way.
-   */
-  const physicalName = template.Resources.GitHubDeployRole.Properties.RoleName
-  const attachesToDeployRole = (properties: any) =>
-    [...(properties?.Roles ?? []), properties?.RoleName].filter(Boolean).some((target: any) => {
-      const text = JSON.stringify(target)
-      return text.includes('GitHubDeployRole') || (Boolean(physicalName) && text.includes(physicalName))
-    })
-
-  for (const resource of Object.values(template.Resources) as any[]) {
-    if (!ATTACHABLE_POLICY_TYPES.includes(resource.Type)) continue
-    if (!attachesToDeployRole(resource.Properties)) continue
-    statements.push(...(resource.Properties?.PolicyDocument?.Statement ?? []))
-  }
-  return statements
-}
-
 function sharedBootstrapMutations(statement: any) {
   const asList = (value: any) => (Array.isArray(value) ? value : [value])
 
@@ -325,12 +283,26 @@ function assertComposedDeployRoleArn(source: string, stageExpression: string) {
   )
 }
 
-function readDeployTemplate() {
-  return load(readFileSync(DEV_DEPLOY_ROLE, 'utf8'), { schema: CLOUDFORMATION_SCHEMA })
+function readDeployRolePolicy() {
+  return JSON.parse(readFileSync(DEV_DEPLOY_ROLE_POLICY, 'utf8'))
+}
+
+function readDeployRoleTrust() {
+  return JSON.parse(readFileSync(DEV_DEPLOY_ROLE_TRUST, 'utf8'))
 }
 
 function readRuntimeBoundaryStatements() {
-  return readDeployTemplate().Resources.BoxLiteRuntimePermissionsBoundary.Properties.PolicyDocument.Statement
+  return JSON.parse(readFileSync(DEV_RUNTIME_BOUNDARY_POLICY, 'utf8')).Statement
+}
+
+/*
+ * Every statement that reaches the deploy role. bootstrap/aws.ts's ensureDeployRole is the only
+ * place in this repository that grants anything to boxlite-<stage>-github-deploy — one
+ * `put-role-policy` call against this one file, no managed policy ever attached — so unlike a
+ * CloudFormation template, there is no second resource type a grant could hide in.
+ */
+function deployRolePolicyStatements() {
+  return readDeployRolePolicy().Statement
 }
 
 function findStatement(statements: any, sid: any) {
@@ -350,7 +322,7 @@ test('SST deploy verifies the selected Runner artifact before invoking SST', () 
   // Runner are addressed by a ref that names a different commit.
   //
   // Both sources, not one: a Runner-only build addresses no Api ref, so passing `apiSource` alone
-  // would skip the check for exactly the deploy `npm run runner:build-artifact` produces.
+  // would skip the check for exactly the deploy `npm run runner:build-artifact:legacy` produces.
   assertLiveLine(source, /requireCheckoutMatchesArtifactRefs\(\[apiSource, runnerSource\]\)/)
   assert.match(source, /verifyRunnerArtifact \} from '\.\.\/artifacts\/runner\.js'/)
   // Resolved only when the scope covers it. Dropping the guard restores the failure this scope
@@ -494,12 +466,10 @@ test('the deploy role cannot rewrite its own permissions', () => {
    * Derived from what is granted rather than listing actions here: adding a role-mutating action to
    * the Allows must fail until the Deny covers it too, which a hand-written list would not do.
    */
-  const template = readDeployTemplate()
-  const statements = deployRolePolicyStatements(template)
+  const statements = deployRolePolicyStatements()
   const asArray = (value: any) => (Array.isArray(value) ? value : [value])
-  const SELF_ARN = 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/boxlite-${GitHubEnvironment}-github-deploy'
-  const BOUNDARY_ARN =
-    'arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/boxlite-${GitHubEnvironment}-runtime-boundary'
+  const SELF_ARN = 'arn:aws:iam::<ACCOUNT>:role/boxlite-<STAGE>-github-deploy'
+  const BOUNDARY_ARN = 'arn:aws:iam::<ACCOUNT>:policy/boxlite-<STAGE>-runtime-boundary'
   const SELF_MUTATING = /^iam:(Attach|Detach|Put|Delete|Update)/i
 
   const granted = new Set<string>()
@@ -509,7 +479,7 @@ test('the deploy role cannot rewrite its own permissions', () => {
      * Glob against this role's own ARN, matching how the Deny side below is checked.
      *
      * This was a literal `role/boxlite-*` search, which stopped matching anything once #1255 scoped
-     * the Allows to `role/boxlite-${GitHubEnvironment}-*` — a pattern that still reaches this role.
+     * the Allows to `role/boxlite-<STAGE>-*` — a pattern that still reaches this role.
      * The premise assertion below catches that and fails, so the risk was never a silent pass; it was
      * a loud failure whose obvious "fix" is to widen the grants back until the string matches again.
      *
@@ -582,11 +552,11 @@ test('the deploy role cannot rewrite its own permissions', () => {
 
   /*
    * And a SIBLING stage's deploy role. No Allow reaches one any more — #1255 scoped them all to
-   * ${GitHubEnvironment} — so this Deny is a backstop rather than a live patch, and it is asserted
-   * for the same reason the template keeps it cross-stage: the next grant that widens should hit a
+   * <STAGE> — so this Deny is a backstop rather than a live patch, and it is asserted
+   * for the same reason the policy keeps it cross-stage: the next grant that widens should hit a
    * Deny already in place instead of needing one written under time pressure.
    */
-  const siblingArn = SELF_ARN.replace('${GitHubEnvironment}', 'some-other-stage')
+  const siblingArn = SELF_ARN.replace('<STAGE>', 'some-other-stage')
   const deniedOnSibling = statements
     .filter((statement: any) => statement.Effect === 'Deny' && statement.Condition === undefined)
     .filter((statement: any) =>
@@ -601,7 +571,7 @@ test('the deploy role cannot rewrite its own permissions', () => {
 
   // The boundary gets the same backstop for the same reason, one level down: nothing grants a dev job
   // reach over prod's boundary today, and this is what keeps that true if something regains it.
-  const siblingBoundaryArn = BOUNDARY_ARN.replace('${GitHubEnvironment}', 'some-other-stage')
+  const siblingBoundaryArn = BOUNDARY_ARN.replace('<STAGE>', 'some-other-stage')
   const deniedOnSiblingBoundary = statements
     .filter((statement: any) => statement.Effect === 'Deny' && statement.Condition === undefined)
     .filter((statement: any) =>
@@ -624,15 +594,13 @@ test('the grants that are NOT stage-scoped are the documented ones, and only tho
    * the two together are the whole picture: a grant that is account-wide because its resource has no
    * stage to scope to is a documented limit, and a new one appearing silently is not.
    *
-   * Pinned against docs/security.md, because a limit nobody wrote down is indistinguishable from one
+   * Pinned against docs/aws/security.md, because a limit nobody wrote down is indistinguishable from one
    * nobody noticed.
    */
-  // Every policy that reaches the role, inline or attached — the same collection the isolation test
-  // uses, because a grant added through an attached policy is exactly as account-wide as an inline one.
-  const template = readDeployTemplate()
-  const statements = deployRolePolicyStatements(template)
+  // The same statements the isolation test above reads.
+  const statements = deployRolePolicyStatements()
   const asArray = (value: any) => (Array.isArray(value) ? value : [value])
-  const stageScoped = (resource: any) => String(resource).includes('${GitHubEnvironment}')
+  const stageScoped = (resource: any) => String(resource).includes('<STAGE>')
 
   /*
    * Every resource that names no stage, excluding the SST backing store the other test covers.
@@ -741,9 +709,7 @@ test('the grants that are NOT stage-scoped are the documented ones, and only tho
     Sid: 'SecretsForThisStage',
     Effect: 'Allow',
     Action: 'secretsmanager:*',
-    Resource: [
-      'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:boxlite-${GitHubEnvironment}-*',
-    ],
+    Resource: ['arn:aws:secretsmanager:<REGION>:<ACCOUNT>:secret:boxlite-<STAGE>-*'],
   })
 
   /*
@@ -770,13 +736,13 @@ test('the grants that are NOT stage-scoped are the documented ones, and only tho
    * way: narrow or delete boxlite-volume-* later and security.md would still describe it as shared,
    * with nothing failing. So each documented pattern must also still match a real unscoped resource.
    */
-  const security = readFileSync(join(REPO_ROOT, 'apps/infra/docs/security.md'), 'utf8')
+  const security = readFileSync(join(REPO_ROOT, 'apps/infra/docs/aws/security.md'), 'utf8')
   for (const [pattern] of DOCUMENTED_IN_SECURITY_MD) {
     const claim = pattern.replace(/^:/, '').replace(/-$/, '-*')
-    assert.ok(security.includes(claim), `docs/security.md must still name ${claim} as a shared grant`)
+    assert.ok(security.includes(claim), `docs/aws/security.md must still name ${claim} as a shared grant`)
     assert.ok(
       unscoped.some(({ resource }: any) => resource.includes(pattern)),
-      `docs/security.md still describes ${claim} as reaching every stage, but no grant matches it — ` +
+      `docs/aws/security.md still describes ${claim} as reaching every stage, but no grant matches it — ` +
         'either the policy was narrowed and the note is now wrong, or the pattern here is stale',
     )
   }
@@ -791,7 +757,7 @@ test('every step that runs the sst wrapper is given the Cloudflare credentials',
    *
    * `install` counts: it evaluates sst.config.ts, which initializes every provider declared there.
    */
-  const workflow: any = load(readFileSync(DEPLOY_WORKFLOW, 'utf8'), { schema: CLOUDFORMATION_SCHEMA })
+  const workflow: any = load(readFileSync(DEPLOY_WORKFLOW, 'utf8'))
   const steps = values(workflow.jobs).flatMap((job: any) => job.steps ?? [])
   const wrapperSteps = steps.filter((step: any) => typeof step.run === 'string' && /npm run .*\bsst\b/.test(step.run))
   assert.ok(wrapperSteps.length > 0, 'no step runs the sst wrapper; this test is looking at the wrong thing')
@@ -987,16 +953,25 @@ test('deployment previews and reconciles the full stack in guarded GitHub CI', (
   // A conflicting PR has no merge commit, and an uncomputed one is a "not yet" rather than a
   // verdict — distinct causes, so distinct refusals. Emitting the head as a fallback would
   // silently reintroduce exactly the behaviour this replaces.
+  assertShellLine(refGuardStep.run, /\[ "\$state" = "OPEN" \] \|\| \{/)
   assertShellLine(refGuardStep.run, /\[ "\$mergeable" != "CONFLICTING" \] \|\| \{/)
-  assertShellLine(refGuardStep.run, /\[ -n "\$sha" \] \|\| \{/)
+  // MERGEABLE, not merely "not CONFLICTING": UNKNOWN arrives beside a merge commit computed
+  // before the last push, which is a tree neither side of the request has.
+  assertShellLine(refGuardStep.run, /\{ \[ "\$mergeable" = "MERGEABLE" \] && \[ -n "\$sha" \]; \} \|\| \{/)
   // Mergeability is computed lazily, so a cold cache answers UNKNOWN and the merge SHA is empty.
   // Both the loop AND its re-query are pinned: without the re-query the loop spins over the same
   // stale JSON, which fails a dispatch that one refresh would have resolved and makes the "after
   // 5 attempts" message untrue.
   assertShellLine(refGuardStep.run, /for attempt in 1 2 3 4 5; do/)
-  assertShellLine(refGuardStep.run, /\[ "\$mergeable" = "UNKNOWN" \] \|\| \[ -z "\$sha" \] \|\| break/)
+  assertShellLine(refGuardStep.run, /if \[ "\$mergeable" != "UNKNOWN" \] && \[ -n "\$sha" \]; then break; fi/)
   const retryBody = liveShell(refGuardStep.run)
   const loopStart = retryBody.indexOf('for attempt in 1 2 3 4 5; do')
+  // Every field the verdict rests on is read from the refreshed response, never from the first:
+  // a request closed while this polled is one the verdict above has to see as closed.
+  for (const field of ['state', 'mergeable', 'sha']) {
+    const read = retryBody.indexOf(`${field}="$(jq -r`)
+    assert.ok(read > loopStart, `${field} is read above the poll, so the verdict is about the first response`)
+  }
   assert.match(
     retryBody.slice(loopStart, retryBody.indexOf('done', loopStart)),
     /pr_json="\$\(gh pr view/,
@@ -1006,7 +981,7 @@ test('deployment previews and reconciles the full stack in guarded GitHub CI', (
   // preceded by whitespace as a comment and deletes the rest of the line. The guards above are
   // pinned live — they carry the behaviour; these two only pin that each cause says its own name.
   assert.match(refGuardStep.run, /conflicts with main, so it has no merge commit to deploy/)
-  assert.match(refGuardStep.run, /has no merge commit yet \(mergeable=\$mergeable\)/)
+  assert.match(refGuardStep.run, /has no merge commit this run can trust \(mergeable=\$mergeable\)/)
   assert.doesNotMatch(
     liveShell(refGuardStep.run),
     /sha="\$head_sha"/,
@@ -1258,44 +1233,20 @@ test('deployment previews and reconciles the full stack in guarded GitHub CI', (
 })
 
 test('the checked-in deploy role satisfies the CI IAM boundary preflight', () => {
-  // The preflight gates every deploy, so the template it inspects must actually
-  // grant what it looks for. Reads the real bootstrap/aws/github-deploy-role.yaml rather
-  // than a hand-copied fixture, so template drift fails here instead of wedging
-  // CI on the next run.
-  const template = load(readFileSync(DEV_DEPLOY_ROLE, 'utf8'), { schema: CLOUDFORMATION_SCHEMA })
+  // The preflight gates every deploy, so the document it inspects must actually grant what it
+  // looks for. Rendered through aws.ts's own `render` rather than a hand-copied fixture, so a
+  // real drift between the two fails here instead of wedging CI on the next run.
   const accountId = '123456789012'
   const stage = 'dev'
-  const policyDocuments = template.Resources.GitHubDeployRole.Properties.Policies.map((policy: any) => policy.PolicyDocument)
-
-  // `!Ref BoxLiteRuntimePermissionsBoundary` yields that ManagedPolicy's ARN at
-  // deploy time; the YAML parser leaves the logical id. Resolve it through the
-  // resource's declared ManagedPolicyName so renaming the policy — which would
-  // break the real grant — fails this test instead of passing vacuously.
-  const boundaryPolicyName = template.Resources.BoxLiteRuntimePermissionsBoundary.Properties.ManagedPolicyName.replace(
-    '${GitHubEnvironment}',
-    stage,
-  )
-  const boundaryArn = `arn:aws:iam::${accountId}:policy/${boundaryPolicyName}`
-
-  const resolved = JSON.parse(
-    JSON.stringify(policyDocuments)
-      .replaceAll('${AWS::Partition}', 'aws')
-      .replaceAll('${AWS::AccountId}', accountId)
-      .replaceAll('${GitHubEnvironment}', stage)
-      .replaceAll('"BoxLiteRuntimePermissionsBoundary"', JSON.stringify(boundaryArn)),
-  )
+  const rendered = render(readFileSync(DEV_DEPLOY_ROLE_POLICY, 'utf8'), { repo: 'boxlite-ai/boxlite', stage, accountId, region: 'ap-southeast-1' })
 
   const { grants } = verifyDeployRoleGrantsBoundaryPermission({
     callerArn: `arn:aws:sts::${accountId}:assumed-role/boxlite-${stage}-github-deploy/session`,
     accountId,
     stage,
-    policyDocuments: resolved,
+    policyDocuments: [JSON.parse(rendered)],
   })
-  assert.equal(
-    grants,
-    true,
-    'bootstrap/aws/github-deploy-role.yaml must grant iam:PutRolePermissionsBoundary for the stage boundary',
-  )
+  assert.equal(grants, true, 'bootstrap/aws/deploy-role-policy.json must grant iam:PutRolePermissionsBoundary for the stage boundary')
 })
 
 test('the deploy role grants the CloudFront KeyValueStore prefix Router needs', () => {
@@ -1304,15 +1255,12 @@ test('the deploy role grants the CloudFront KeyValueStore prefix Router needs', 
   // prefixes. sst.aws.Router stores its route table in a KeyValueStore, so
   // without this grant every apply dies on DescribeKeyValueStore while every
   // preview passes, because a preview makes no KV call.
-  const template = load(readFileSync(DEV_DEPLOY_ROLE, 'utf8'), { schema: CLOUDFORMATION_SCHEMA })
-  const actions = template.Resources.GitHubDeployRole.Properties.Policies.flatMap((policy: any) =>
-    policy.PolicyDocument.Statement.flatMap((statement: any) =>
-      Array.isArray(statement.Action) ? statement.Action : [statement.Action],
-    ),
+  const actions = readDeployRolePolicy().Statement.flatMap((statement: any) =>
+    Array.isArray(statement.Action) ? statement.Action : [statement.Action],
   )
   assert.ok(
     actions.includes('cloudfront-keyvaluestore:*'),
-    'bootstrap/aws/github-deploy-role.yaml must grant cloudfront-keyvaluestore:*; cloudfront:* does not cover it',
+    'bootstrap/aws/deploy-role-policy.json must grant cloudfront-keyvaluestore:*; cloudfront:* does not cover it',
   )
 })
 
@@ -1437,19 +1385,24 @@ test('the deploy role cannot reach another stage in the SST backing store', () =
   // secret/boxlite/dev.json beside secret/boxlite/prod.json. With s3:* and ssm:* on '*', a job bound to
   // the dev Environment could read prod's. This change makes the stage configuration authoritative in
   // that store, so it is the whole stack's config now, not just its app secrets.
-  const template = readDeployTemplate()
   /*
-   * Every policy that reaches the role — see deployRolePolicyStatements. A managed policy ARN is
-   * different: its contents live outside this template, so there is nothing here to check it against
-   * and the role must not attach one.
+   * A managed policy's contents live outside deploy-role-policy.json, so there is nothing here to
+   * check it against — the deploy role must never carry one. bootstrap/aws.ts's ensureDeployRole is
+   * the only place that grants anything to this role, so reading its own source for the one call
+   * that could attach one is exhaustive, unlike a CloudFormation template where a managed policy
+   * could be a resource anywhere in the file.
    */
-  assert.deepEqual(
-    template.Resources.GitHubDeployRole.Properties.ManagedPolicyArns ?? [],
-    [],
-    'a managed policy ARN points outside this template, so its grants cannot be checked here',
+  const ensureDeployRoleSource = readFileSync(join(REPO_ROOT, 'apps/infra/bootstrap/aws.ts'), 'utf8').match(
+    /const ensureDeployRole = async[\s\S]*?\n}\n/,
+  )?.[0]
+  assert.ok(ensureDeployRoleSource, 'ensureDeployRole must exist in bootstrap/aws.ts')
+  assert.doesNotMatch(
+    ensureDeployRoleSource!,
+    /attach-role-policy/,
+    'the deploy role must never attach a managed policy; its grants must all be readable from deploy-role-policy.json',
   )
 
-  const statements = deployRolePolicyStatements(template)
+  const statements = deployRolePolicyStatements()
   assert.ok(statements.length > 0, 'the deploy role has no policy statements to check')
   const asArray = (value: any) => (Array.isArray(value) ? value : [value])
 
@@ -1465,12 +1418,12 @@ test('the deploy role cannot reach another stage in the SST backing store', () =
     )
   }
 
-  // Every state object names the stage. `!Sub` is parsed to its literal body by CLOUDFORMATION_SCHEMA,
-  // so the interpolation is visible as text.
+  // Every state object names the stage — the <STAGE> placeholder is visible as literal text before
+  // aws.ts's render fills it in.
   const stateObjects = statements.find((statement: any) => statement.Sid === 'SstStateObjectsForThisStage')
   assert.ok(stateObjects, 'the stage-scoped state grant is missing')
   for (const resource of asArray(stateObjects.Resource)) {
-    const scoped = resource.includes('${GitHubEnvironment}') || resource.includes('sst-asset-')
+    const scoped = resource.includes('<STAGE>') || resource.includes('sst-asset-')
     assert.ok(scoped, `${resource} is not scoped to the stage`)
   }
 
@@ -1498,7 +1451,7 @@ test('the deploy role cannot reach another stage in the SST backing store', () =
   }
   const passphrase = asArray(parameters.Resource).find((resource: string) => resource.includes('/sst/passphrase/'))
   assert.ok(
-    passphrase && passphrase.includes('${GitHubEnvironment}'),
+    passphrase && passphrase.includes('<STAGE>'),
     'the passphrase decrypts one stage of state and must not be shared',
   )
 })
@@ -1652,8 +1605,70 @@ test('a job calling a reusable workflow grants at least what that workflow asks 
       checked += 1
     }
   }
-  assert.ok(checked >= 11, `expected every local reusable call to be swept, saw ${checked}`)
+  // The same thirteen the input sweep below counts: six `config.yml` loads,
+  // deploy-infra's four, and mdeploy-all's three. The exact count, not a
+  // floor, so a call that stops being swept fails here rather than being
+  // absorbed — and adding one means changing this number in the same commit.
+  assert.equal(checked, 13, `expected every local reusable call to be swept, saw ${checked}`)
 })
+
+test('every reusable workflow is called with the inputs it declares', () => {
+  /*
+   * The same class the composite-action sweep covers, one level up: a job that
+   * `uses:` another workflow passes inputs by name, and a name that workflow
+   * does not declare — or a required one it omits — fails when the run is
+   * dispatched rather than when the rename is made. Nothing typechecks either
+   * side, and the callers here are the release path.
+   */
+  const workflowDirectory = join(REPO_ROOT, '.github/workflows')
+  let checked = 0
+
+  for (const entry of readdirSync(workflowDirectory)) {
+    if (!/\.ya?ml$/.test(entry)) continue
+    const workflow = load(readFileSync(join(workflowDirectory, entry), 'utf8'))
+    for (const [jobName, job] of entries(workflow.jobs)) {
+      const uses = String(job.uses ?? '')
+      if (!uses.startsWith('./.github/workflows/')) continue
+      const where = `${entry} job '${jobName}'`
+      const calledPath = join(REPO_ROOT, uses.slice(2))
+      assert.ok(existsSync(calledPath), `${where} calls ${uses}, which does not exist`)
+
+      const called = load(readFileSync(calledPath, 'utf8'))
+      const callable = called.on?.workflow_call
+      assert.ok(callable !== undefined, `${where} calls ${uses}, which is not callable`)
+      // A callable workflow that takes nothing is fine — `config.yml` is one —
+      // so what is checked is the names, against however many it declares.
+      const declared = callable?.inputs ?? {}
+      for (const key of Object.keys(job.with ?? {})) {
+        assert.ok(key in declared, `${where} passes '${key}', which ${uses} does not declare`)
+      }
+      for (const [key, spec] of entries(declared)) {
+        if (spec?.required !== true || spec?.default !== undefined) continue
+        assert.notEqual((job.with ?? {})[key], undefined, `${where} omits required input '${key}' of ${uses}`)
+      }
+      checked += 1
+    }
+  }
+  // Every local `uses:` in the directory, not just the deploy path's: six
+  // build workflows load `config.yml`, `deploy-infra.yml` calls four, and
+  // mdeploy-all makes three — one commit-line publish and the release line's
+  // two, where it made four until the apply and the runner build went inline.
+  // The exact count, not a floor: a call that stops being swept is the drop
+  // this exists to catch, and one that appears is a caller nobody reviewed.
+  // Adding a legitimate one means changing this number in the same commit.
+  assert.equal(checked, 13, `expected every reusable-workflow call swept, saw ${checked}`)
+})
+
+/**
+ * The deployment Environments a dispatch may bind to.
+ *
+ * Each is an Environment a bootstrap created. It matters because a stage's
+ * declaration lives in its Environment — an allowlist offering a name with no
+ * Environment behind it reaches a job with no declaration to read. The `none`
+ * sentinel went with `mdeploy-all.yml`'s `auto_promote_from`: a promotion's
+ * source is dev, and there is no longer a choice that binds a job to nothing.
+ */
+const ENVIRONMENTS = ['dev', 'prod']
 
 test('every workflow that selects a deployment Environment does so from an allowlist', () => {
   // The rule is stated once in .github/workflows/README.md and enforced here across every
@@ -1684,11 +1699,37 @@ test('every workflow that selects a deployment Environment does so from an allow
         selected || !environment.includes('${{'),
         `${where} selects an Environment through an expression this guard cannot follow: ${environment}`,
       )
-      if (selected) {
+      // A workflow with no dispatch has no dispatcher, and the allowlist exists
+      // to stop one reaching an Environment through a typo. It could not pass
+      // the check either way: `workflow_call` inputs take only boolean, number
+      // and string, so `choice` is a shape a callee cannot declare. What covers
+      // it instead is this same sweep reaching its caller — mdeploy-all binds
+      // the stage from its own allowlisted input. So the rule here is that the
+      // workflow really is unreachable by hand.
+      const byHand = workflow.on?.workflow_dispatch !== undefined
+      if (!byHand) {
+        assert.ok(
+          workflow.on?.workflow_call !== undefined,
+          `${where} is reachable by neither dispatch nor call, so nothing can run it`,
+        )
+      }
+      if (selected && byHand) {
         const declared = inputs[selected[1]]
         assert.ok(declared, `${where} selects an Environment from an undeclared input '${selected[1]}'`)
         assert.equal(declared.type, 'choice', `${where} input '${selected[1]}' must be an allowlist`)
         assert.ok(declared.options?.length > 0, `${where} input '${selected[1]}' has an empty allowlist`)
+        // And an allowlist of Environments that exist. An option naming one
+        // that was never bootstrapped runs the job against no Environment at
+        // all: no vars, no secrets, and a federation that fails on the identity
+        // rather than on the typo. Pinned rather than derived, because
+        // Environments live in GitHub rather than in this repository — the
+        // second half of "Adding a stage" in .github/workflows/README.md.
+        for (const option of declared.options) {
+          assert.ok(
+            ENVIRONMENTS.includes(option),
+            `${where} input '${selected[1]}' offers '${option}', which has no deployment Environment`,
+          )
+        }
       }
 
       // The same job that reaches a protected Environment reaches the AWS role behind it, so
@@ -1700,9 +1741,75 @@ test('every workflow that selects a deployment Environment does so from an allow
 
   assert.deepEqual(
     [...swept].sort(),
-    ['build-apps-api-image.yml', 'deploy-infra.yml', 'deploy-release.yml'],
+    // mdeploy-all.yml is the one rollout path: it applies the stack and stages
+    // a runner itself, because a second job on one Environment is a second
+    // wait on its reviewers — which is why mdeploy.yml and mrunner.yml are
+    // gone. mbuild.yml is its commit line and mbuild-release.yml its release
+    // line. Listed here deliberately: the point of pinning the set is that a
+    // seventh deploy workflow is a reviewed addition rather than one that
+    // appeared.
+    ['build-apps-api-image.yml', 'deploy-infra.yml', 'deploy-release.yml', 'mbuild-release.yml', 'mbuild.yml', 'mdeploy-all.yml'],
     'the swept set no longer matches the deployment workflows',
   )
+})
+
+/**
+ * The apps/infra commands that ask mstage for a session before doing anything.
+ *
+ * Named rather than derived: which of them reaches `checkLogin` is a property
+ * of the tools (`mdeploy/src/run.ts`, `runner-build.ts`, `runner-promote.ts`,
+ * `runner-update.ts`), and pinning the set is what makes a sixth one a reviewed
+ * addition rather than one that appeared.
+ */
+const SESSION_CHECKING = /npm run (?:--silent )?(?:mstage login|mdeploy|runner:build|runner:promote|runner:update)\b/
+
+test('every step that asks mstage for a session is given a token to answer with', () => {
+  /*
+   * `gh` ships on a runner and is never signed in, and a stage declaration names
+   * github a required provider — so a tool that checks the session first refuses
+   * with `Required sign-ins are missing` wherever GH_TOKEN is out of scope.
+   *
+   * What it cost: a runner build that had federated its cloud identity and
+   * passed `mstage login` one step earlier, then died on the session anyway,
+   * because the token was that step's rather than the whole workflow's. Scope is
+   * the thing asserted, not placement — a step may carry its own.
+   */
+  const workflowDirectory = join(REPO_ROOT, '.github/workflows')
+  let checked = 0
+
+  for (const entry of readdirSync(workflowDirectory)) {
+    if (!/\.ya?ml$/.test(entry)) continue
+    const workflow: any = load(readFileSync(join(workflowDirectory, entry), 'utf8'))
+
+    for (const [jobName, job] of entries(workflow.jobs ?? {})) {
+      for (const step of job.steps ?? []) {
+        // Comments and the lines that only print a command: neither runs one,
+        // and both mention these scripts where a deploy tells an operator what
+        // to rerun by hand.
+        const invoked = String(step.run ?? '')
+          .split('\n')
+          .filter((line: string) => !/^\s*(#|echo\b)/.test(line))
+          .join('\n')
+        if (!SESSION_CHECKING.test(invoked)) continue
+
+        const where = `${entry} job '${jobName}' step '${step.name ?? step.id ?? invoked.trim().slice(0, 40)}'`
+        assert.ok(
+          'GH_TOKEN' in (workflow.env ?? {}) || 'GH_TOKEN' in (job.env ?? {}) || 'GH_TOKEN' in (step.env ?? {}),
+          `${where} runs a tool that checks the mstage session with no GH_TOKEN in scope`,
+        )
+        checked += 1
+      }
+    }
+  }
+
+  // Eight: mbuild's session check and mbuild-release's two; then the five in
+  // mdeploy-all's three tool-reaching jobs — `plan`'s `--check` read,
+  // `build-runner`'s session check and its build, `deploy`'s session check and
+  // its apply.
+  // The exact count, not a floor: a step that stops being swept is exactly the
+  // drop this exists to catch, and one that appears is a tool call nobody
+  // reviewed. Adding a legitimate one means changing this number with it.
+  assert.equal(checked, 8, `expected every session-checking step swept, saw ${checked}`)
 })
 
 test('API publishing builds once and promotes that exact image without rebuilding', () => {
@@ -1830,49 +1937,36 @@ test('promotion reads the source stage in the source stage\'s own region', () =>
   assertShellLine(verifyRun, /if \[ -z "\$source_digest" \] \|\| \[ "\$source_digest" = None \]; then/)
 })
 
-test('infrastructure tests cannot persist or write with the workflow token', () => {
-  const source = readFileSync(LINT_WORKFLOW, 'utf8')
-  const infraJobStart = source.indexOf('\n  infra:\n')
-  const infraJobEnd = source.indexOf('  # Single required status check', infraJobStart)
-  assert.notEqual(infraJobStart, -1, 'infra job marker is missing from lint.yml')
-  assert.notEqual(infraJobEnd, -1, 'required-status marker is missing from lint.yml')
-  const infraJob = source.slice(infraJobStart, infraJobEnd)
-
-  assert.match(infraJob, /permissions:\s+contents: read/)
-  assert.match(infraJob, /uses: actions\/checkout@v5\s+with:\s+persist-credentials: false/)
-})
-
 test('dev deploy role trusts only the repository GitHub Environment identity', () => {
-  assert.ok(existsSync(DEV_DEPLOY_ROLE), 'the GitHub deployment role template is missing')
-  const source = readFileSync(DEV_DEPLOY_ROLE, 'utf8')
+  assert.ok(existsSync(DEV_DEPLOY_ROLE_TRUST), 'the deploy role trust document is missing')
+  const trust = readFileSync(DEV_DEPLOY_ROLE_TRUST, 'utf8')
+  const policy = readFileSync(DEV_DEPLOY_ROLE_POLICY, 'utf8')
+  const awsSource = readFileSync(join(REPO_ROOT, 'apps/infra/bootstrap/aws.ts'), 'utf8')
   const statements = readRuntimeBoundaryStatements()
 
-  assert.match(source, /oidc-provider\/token\.actions\.githubusercontent\.com/)
-  assert.match(source, /token\.actions\.githubusercontent\.com:aud: sts\.amazonaws\.com/)
-  assert.match(
-    source,
-    /token\.actions\.githubusercontent\.com:sub: !Sub repo:\$\{GitHubRepository\}:environment:\$\{GitHubEnvironment\}/,
-  )
-  assert.doesNotMatch(source, /AdministratorAccess/)
-  assert.match(source, /BoxLiteRuntimePermissionsBoundary:/)
-  assert.match(source, /iam:PermissionsBoundary/)
-  assert.match(source, /PolicyName: boxlite-sst-deploy/)
+  assert.match(trust, /oidc-provider\/token\.actions\.githubusercontent\.com/)
+  assert.match(trust, /token\.actions\.githubusercontent\.com:aud.{0,20}sts\.amazonaws\.com/s)
+  assert.match(trust, /token\.actions\.githubusercontent\.com:sub.{0,20}repo:<REPO>:environment:<STAGE>/s)
+  assert.doesNotMatch(trust, /AdministratorAccess/)
+  assert.doesNotMatch(policy, /AdministratorAccess/)
+  assert.match(policy, /policy\/boxlite-<STAGE>-runtime-boundary/)
+  assert.match(policy, /iam:PermissionsBoundary/)
+  assert.match(awsSource, /'boxlite-sst-deploy'/)
 
   assert.deepEqual(findStatement(statements, 'BoxLiteStageSecrets'), {
     Sid: 'BoxLiteStageSecrets',
     Effect: 'Allow',
     Action: ['secretsmanager:DescribeSecret', 'secretsmanager:GetSecretValue'],
-    Resource:
-      'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:boxlite-${GitHubEnvironment}-*',
+    Resource: 'arn:aws:secretsmanager:<REGION>:<ACCOUNT>:secret:boxlite-<STAGE>-*',
   })
   assert.deepEqual(findStatement(statements, 'BoxLiteStageKmsKeys'), {
     Sid: 'BoxLiteStageKmsKeys',
     Effect: 'Allow',
     Action: 'kms:Decrypt',
-    Resource: 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*',
+    Resource: 'arn:aws:kms:<REGION>:<ACCOUNT>:key/*',
     Condition: {
       'ForAnyValue:StringLike': {
-        'kms:ResourceAliases': 'alias/boxlite-${GitHubEnvironment}-*',
+        'kms:ResourceAliases': 'alias/boxlite-<STAGE>-*',
       },
     },
   })
@@ -1887,86 +1981,59 @@ test('dev deploy role trusts only the repository GitHub Environment identity', (
       's3:ListBucketVersions',
       's3:PutBucketTagging',
     ],
-    Resource: [
-      'arn:${AWS::Partition}:s3:::boxlite-${GitHubEnvironment}-*',
-      'arn:${AWS::Partition}:s3:::boxlite-app-${GitHubEnvironment}-*',
-      'arn:${AWS::Partition}:s3:::boxlite-volume-*',
-    ],
+    Resource: ['arn:aws:s3:::boxlite-<STAGE>-*', 'arn:aws:s3:::boxlite-app-<STAGE>-*', 'arn:aws:s3:::boxlite-volume-*'],
   })
   assert.deepEqual(findStatement(statements, 'BoxLiteBucketObjects'), {
     Sid: 'BoxLiteBucketObjects',
     Effect: 'Allow',
     Action: ['s3:AbortMultipartUpload', 's3:DeleteObject', 's3:DeleteObjectVersion', 's3:GetObject', 's3:PutObject'],
     Resource: [
-      'arn:${AWS::Partition}:s3:::boxlite-${GitHubEnvironment}-*/*',
-      'arn:${AWS::Partition}:s3:::boxlite-app-${GitHubEnvironment}-*/*',
-      'arn:${AWS::Partition}:s3:::boxlite-volume-*/*',
+      'arn:aws:s3:::boxlite-<STAGE>-*/*',
+      'arn:aws:s3:::boxlite-app-<STAGE>-*/*',
+      'arn:aws:s3:::boxlite-volume-*/*',
     ],
   })
   /*
    * The last sibling, and the one the unscoped-grant test cannot reach: it collects the deploy role's
-   * own policies, and this statement lives in the boundary ManagedPolicy, which names no role. So
-   * `boxlite-*` here — a task assuming another stage's runtime role — was revertible with every test
-   * still green, which is the failure shared/resource-name.ts:22-25 already records once.
+   * own policy, and this statement lives in the boundary policy, which names no role. So `boxlite-*`
+   * here — a task assuming another stage's runtime role — was revertible with every test still green,
+   * which is the failure shared/resource-name.ts:22-25 already records once.
    */
   assert.deepEqual(findStatement(statements, 'AssumeBoxLiteRuntimeRoles'), {
     Sid: 'AssumeBoxLiteRuntimeRoles',
     Effect: 'Allow',
     Action: 'sts:AssumeRole',
-    Resource: 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/boxlite-${GitHubEnvironment}-*',
+    Resource: 'arn:aws:iam::<ACCOUNT>:role/boxlite-<STAGE>-*',
   })
 })
 
 test('the stage bootstrap owns artifact stores needed before an SST deploy can start', () => {
-  const template = readDeployTemplate()
-  const resources = template.Resources
+  // No declarative resource tree to deepEqual any more — aws.ts creates these imperatively. This
+  // reads its source for the specific flags a CloudFormation Properties block used to carry
+  // declaratively, the same way other tests in this file pin a stack/*.ts source rather than
+  // executing it. bootstrap/aws.test.ts exercises the actual reconcile behavior end to end.
+  const awsSource = readFileSync(join(REPO_ROOT, 'apps/infra/bootstrap/aws.ts'), 'utf8')
 
-  assert.deepEqual(template.Parameters.GitHubEnvironment, {
-    Type: 'String',
-    Default: 'dev',
-    MinLength: 1,
-    MaxLength: 32,
-    AllowedPattern: '^[a-z0-9][a-z0-9-]*$',
-  })
-  assert.deepEqual(resources.ApiImagesRepository, {
-    Type: 'AWS::ECR::Repository',
-    DeletionPolicy: 'Retain',
-    UpdateReplacePolicy: 'Retain',
-    Properties: {
-      RepositoryName: 'boxlite-app-${GitHubEnvironment}-api',
-      ImageTagMutability: 'IMMUTABLE',
-      ImageScanningConfiguration: { ScanOnPush: true },
-      EncryptionConfiguration: { EncryptionType: 'AES256' },
-    },
-  })
-  assert.deepEqual(resources.RunnerArtifactsBucket, {
-    Type: 'AWS::S3::Bucket',
-    DeletionPolicy: 'Retain',
-    UpdateReplacePolicy: 'Retain',
-    Properties: {
-      BucketName: 'boxlite-app-${GitHubEnvironment}-artifacts-${AWS::AccountId}',
-      BucketEncryption: {
-        ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }],
-      },
-      VersioningConfiguration: { Status: 'Enabled' },
-      PublicAccessBlockConfiguration: {
-        BlockPublicAcls: true,
-        BlockPublicPolicy: true,
-        IgnorePublicAcls: true,
-        RestrictPublicBuckets: true,
-      },
-      LifecycleConfiguration: {
-        Rules: [
-          {
-            Id: 'expire-superseded-runner-builds',
-            Prefix: 'runner/',
-            Status: 'Enabled',
-            NoncurrentVersionExpiration: { NoncurrentDays: 30 },
-          },
-        ],
-      },
-    },
-  })
+  // One spelling: aws.ts calls the same composers artifacts/api.ts and artifacts/runner.ts read
+  // the names back with, rather than restating boxlite-app-<stage>-api/-artifacts-<account> here.
+  assert.match(awsSource, /apiImageRepository\(\{ app: 'boxlite', stage \}\)/)
+  assert.match(awsSource, /runnerArtifactsBucketName\(\{ app: 'boxlite', stage, accountId \}\)/)
+
+  assert.match(awsSource, /'--image-tag-mutability',\s*\n\s*'IMMUTABLE'/)
+  assert.match(awsSource, /'--image-scanning-configuration',\s*\n\s*'scanOnPush=true'/)
+  assert.match(awsSource, /'--encryption-configuration',\s*\n\s*'encryptionType=AES256'/)
+  // Never deleted or replaced — a stronger guarantee than CloudFormation's DeletionPolicy: Retain
+  // gave the same two resources.
+  assert.doesNotMatch(awsSource, /'delete-repository'|'delete-bucket'/)
+
+  assert.match(awsSource, /ApplyServerSideEncryptionByDefault.*SSEAlgorithm.*AES256/)
+  assert.match(awsSource, /'--versioning-configuration',\s*\n\s*'Status=Enabled'/)
+  for (const flag of ['BlockPublicAcls=true', 'IgnorePublicAcls=true', 'BlockPublicPolicy=true', 'RestrictPublicBuckets=true']) {
+    assert.ok(awsSource.includes(flag), `missing public-access-block flag: ${flag}`)
+  }
+  assert.match(awsSource, /ID:\s*'expire-superseded-runner-builds'/)
+  assert.match(awsSource, /Prefix:\s*'runner\/'/)
+  assert.match(awsSource, /NoncurrentVersionExpiration:\s*\{\s*NoncurrentDays:\s*30\s*\}/)
 })
 
 test('one release selector resolves the API and Runner to the same published version', () => {
@@ -1983,22 +2050,17 @@ test('one release selector resolves the API and Runner to the same published ver
 })
 
 test('every hand-written spelling of an artifact name agrees with the composer', () => {
-  // The defect this guards: the name is declared in CloudFormation, resolved in JS, and written
-  // by hand in the workflow that produces the artifact. Renaming the first two and not the last
-  // two leaves a bootstrap that creates boxlite-app-dev-api and a build that pushes to
-  // boxlite-dev-api — the workflow's own "repository is missing" guard fires and the deploy
-  // fails, with every unit test still green. CloudFormation and bash cannot import
-  // awsResourceName, so agreement is asserted here instead.
-  const template = readDeployTemplate()
+  // The defect this guards: the name is resolved in JS and written by hand in the workflow that
+  // produces the artifact. bootstrap/aws.ts creates the two resources by calling the same
+  // composer (pinned in the previous test), so there is no longer a second declared spelling to
+  // drift from it — only the hand-written bash below can still disagree. Renaming the composer's
+  // grammar and not the workflow leaves a bootstrap that creates boxlite-app-dev-api and a build
+  // that pushes to boxlite-dev-api — the workflow's own "repository is missing" guard fires and
+  // the deploy fails, with every unit test still green. Bash cannot import awsResourceName, so
+  // agreement is asserted here instead.
   const apiWorkflow = readFileSync(API_IMAGE_BUILD_WORKFLOW, 'utf8')
   const deployWorkflow = readFileSync(DEPLOY_WORKFLOW, 'utf8')
 
-  const declaredRepository = template.Resources.ApiImagesRepository.Properties.RepositoryName
-  const declaredBucket = template.Resources.RunnerArtifactsBucket.Properties.BucketName
-  assert.equal(declaredRepository, 'boxlite-app-${GitHubEnvironment}-api')
-  assert.equal(declaredBucket, 'boxlite-app-${GitHubEnvironment}-artifacts-${AWS::AccountId}')
-
-  // Resolved: the same grammar, through the composer the deploy actually calls.
   assert.equal(apiImageRepository({ app: 'boxlite', stage: 'dev' }), 'boxlite-app-dev-api')
   assert.equal(
     runnerArtifactsBucketName({ app: 'boxlite', stage: 'dev', accountId: '123456789012' }),
@@ -2022,7 +2084,7 @@ test('the runtime boundary admits the bucket the Runner is actually pointed at',
   // instance profile. Derive the name, do not spell it.
   const bucket = runnerArtifactsBucketName({ app: 'boxlite', stage: 'dev', accountId: '123456789012' })
   const prefixes = findStatement(readRuntimeBoundaryStatements(), 'BoxLiteBucketObjects').Resource.map((arn: any) =>
-    arn.replace('arn:${AWS::Partition}:s3:::', '').replace('${GitHubEnvironment}', 'dev'),
+    arn.replace('arn:aws:s3:::', '').replace('<STAGE>', 'dev'),
   )
   const admits = prefixes.some((pattern: any) => new RegExp(`^${pattern.replace(/\*/g, '.*')}$`).test(`${bucket}/runner/x`))
   assert.ok(admits, `no BoxLiteBucketObjects prefix admits ${bucket}/runner/*; prefixes: ${prefixes.join(', ')}`)

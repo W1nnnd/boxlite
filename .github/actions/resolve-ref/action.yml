@@ -1,0 +1,110 @@
+# One name for a commit, turned into the commit.
+#
+# mbuild and mdeploy both address exact bytes: a 40-character lowercase commit
+# SHA, and `mbuild/src/address.ts` refuses everything else so that one image can
+# never mean two builds. People do not carry SHAs around, though — they carry
+# `v0.10.1` — so the name is resolved here and the SHA is what reaches the tool.
+#
+# Two things are easy to get wrong and hard to diagnose on a runner:
+#
+#   An annotated tag is an object of its own. `git rev-parse v0.10.1` answers
+#   with that object's hash, which is 40 hex characters and passes every format
+#   check downstream while naming no commit and no image. `^{commit}` is what
+#   dereferences it, and leaving it out fails at the registry rather than here.
+#
+#   A shallow checkout carries no tags. `actions/checkout` defaults to depth 1,
+#   so a tag that exists resolves to nothing; the caller needs `fetch-depth: 0`.
+#   This action cannot fix that from inside, so it says so when it fails.
+name: Resolve a ref to its commit
+description: Turn a commit SHA or a git tag into the full commit SHA the deploy tools address.
+
+inputs:
+  ref:
+    description: A full commit SHA, or any ref (tag, branch) naming one. Empty resolves to nothing.
+    required: false
+    default: ''
+  fallback:
+    description: Used when `ref` is empty — normally github.sha.
+    required: false
+    default: ''
+  branch:
+    description: >-
+      The branch the resolved commit must be on — normally github.ref_name. A
+      commit that branch does not contain is refused. Empty skips the check.
+      Needs the caller's checkout to carry that branch, so `fetch-depth: 0`.
+    required: false
+    default: ''
+
+outputs:
+  sha:
+    description: The 40-character lowercase commit SHA.
+    value: ${{ steps.resolve.outputs.sha }}
+  resolved-from:
+    description: The ref that was resolved, empty when the input was already a SHA.
+    value: ${{ steps.resolve.outputs.resolved-from }}
+
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        REF: ${{ inputs.ref }}
+        FALLBACK: ${{ inputs.fallback }}
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        set -euo pipefail
+        candidate="${REF:-$FALLBACK}"
+        if [ -z "$candidate" ]; then
+          echo "::error title=resolve-ref::neither a ref nor a fallback was given" >&2
+          exit 1
+        fi
+        if [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
+          sha="$candidate"
+          resolved_from=""
+        else
+          sha="$(git rev-parse --verify --quiet "$candidate^{commit}" || true)"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            # Which of the two it is, rather than a guess. A checkout with no
+            # tags at all is the shallow one; a checkout that has tags and not
+            # this one is a name that does not exist, and telling that caller to
+            # raise its fetch-depth sends them to a setting already correct.
+            if [ -z "$(git tag --list | head -n 1)" ]; then
+              echo "::error title=resolve-ref::'$candidate' is not a commit SHA and this checkout carries no tags at all; the caller needs fetch-depth: 0" >&2
+            else
+              near="$(git tag --list "*$candidate*" | head -n 3 | tr '\n' ' ')"
+              echo "::error title=resolve-ref::'$candidate' is not a commit SHA and no ref of that name exists here${near:+ (did you mean: $near)}" >&2
+            fi
+            exit 1
+          fi
+          resolved_from="$candidate"
+        fi
+
+        # A 40-character string is a shape, not a commit. Taken on trust the
+        # deploy went on to ask a registry and a bucket about bytes for a commit
+        # that was never here, and reported their absence rather than the typo.
+        if ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
+          echo "::error title=resolve-ref::'$candidate' is not a commit in this checkout" >&2
+          exit 1
+        fi
+
+        if [ -n "$BRANCH" ]; then
+          head="$(git rev-parse --verify --quiet "refs/remotes/origin/$BRANCH^{commit}" \
+            || git rev-parse --verify --quiet "refs/heads/$BRANCH^{commit}" || true)"
+          if [ -z "$head" ]; then
+            echo "::error title=resolve-ref::this checkout does not carry branch '$BRANCH'; the caller needs fetch-depth: 0" >&2
+            exit 1
+          fi
+          # Contained, not merely existing. A commit on an abandoned branch, or
+          # on one that was force-pushed away, still resolves and still names
+          # bytes — and deploying it puts a stage on something no branch here
+          # will ever produce again.
+          if ! git merge-base --is-ancestor "$sha" "$head"; then
+            echo "::error title=resolve-ref::'$candidate' resolves to $sha, which branch '$BRANCH' does not contain" >&2
+            exit 1
+          fi
+        fi
+
+        printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+        printf 'resolved-from=%s\n' "$resolved_from" >> "$GITHUB_OUTPUT"
+        echo "resolved $candidate to $sha"
