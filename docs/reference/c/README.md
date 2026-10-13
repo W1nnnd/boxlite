@@ -42,7 +42,7 @@ The SDK provides two API styles:
   - [Runtime Management](#runtime-management)
   - [Box Management](#box-management)
   - [Network Tunnels](#network-tunnels)
-  - [Git config](#git-config)
+  - [Git](#git)
   - [Command Execution](#command-execution)
   - [Discovery & Introspection](#discovery--introspection)
   - [Metrics](#metrics)
@@ -763,7 +763,7 @@ local-only host listener that accepts repeated connections.
 
 ---
 
-### Git config
+### Git
 
 ```c
 typedef void (*CGitWriteCb)(CBoxliteError* error, void* user_data);
@@ -1199,7 +1199,7 @@ BoxliteErrorCode boxlite_box_metrics(
 
 1. **All allocated strings must be freed**
    - `boxlite_box_id()` → `boxlite_free_string()`
-   - successful `boxlite_git_get_config()` callback value → `boxlite_free_string()`
+   - successful `boxlite_git_get_config()` / `boxlite_git_status()` / `boxlite_git_branches()` callback value → `boxlite_free_string()`
 
 2. **Error structs must be freed**
    - Caller-owned `CBoxliteError` output → `boxlite_error_free()`
@@ -1399,6 +1399,8 @@ if (code != Ok) {
 | `boxlite_git_configure_user()` | Queue `user.name` / `user.email` write |
 | `boxlite_git_set_config()` | Queue a git config write |
 | `boxlite_git_get_config()` | Queue a git config read |
+| `boxlite_git_status()` | Queue a structured status read (JSON) |
+| `boxlite_git_branches()` | Queue a local branch listing (JSON) |
 | `boxlite_box_info()` | Queue box info lookup |
 | `boxlite_box_metrics()` | Get box metrics |
 | `boxlite_execute()` | Execute command |

@@ -160,7 +160,7 @@ Choose `Connect` or `Forward`; a forwarder prepares fresh tunnels for later
 clients. This differs from `WithPort`, which creates a persistent,
 local-only host listener that accepts repeated connections.
 
-## Git config
+## Git
 
 `Box.Git()` returns a box-scoped handle for guest git config. `scope` is
 `"global"` (default), `"local"`, or `"system"`; `"local"` requires `Path`.
@@ -196,6 +196,9 @@ fmt.Println(email)
 - `git.ConfigureUser(ctx, name, email, opts)` sets `user.name` and `user.email`.
 - `git.SetConfig(ctx, key, value, opts)` writes a git config value.
 - `git.GetConfig(ctx, key, opts)` reads a git config value.
+- `git.Status(ctx, path)` returns `*GitStatus` (`CurrentBranch`, `Upstream`,
+  `Ahead`, `Behind`, `BranchPublished`, `HeadCommit`, `FileStatus`).
+- `git.Branches(ctx, path)` returns `*GitBranches` (`Current`, `Names`).
 - A nil `opts` is global scope. `GitConfigOptions{Scope: "local"}` without
   `Path` returns an error with code `ErrInvalidArgument` and names the missing
   argument.

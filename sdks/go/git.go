@@ -225,9 +225,9 @@ func (g *Git) queryJSON(ctx context.Context, path string, status bool, out any) 
 	var cerr C.CBoxliteError
 	var ok bool
 	if status {
-		ok = C.boxlite_git_status(g.handle, cPath, C.cbGitGetConfig(), handleToPtr(h), &cerr) == C.Ok
+		ok = C.boxlite_git_status(g.handle, cPath, C.cbGitJSON(), handleToPtr(h), &cerr) == C.Ok
 	} else {
-		ok = C.boxlite_git_branches(g.handle, cPath, C.cbGitGetConfig(), handleToPtr(h), &cerr) == C.Ok
+		ok = C.boxlite_git_branches(g.handle, cPath, C.cbGitJSON(), handleToPtr(h), &cerr) == C.Ok
 	}
 	if !ok {
 		deleteHandleForDispatch(h)

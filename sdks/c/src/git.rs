@@ -335,8 +335,11 @@ unsafe fn git_json(
                     .await
                     .map(|v| serde_json::to_string(&v)),
             };
-            // serde_json output never contains NUL, so both conversions hold.
-            let result = json.map(|j| CString::new(j.unwrap_or_default()).unwrap_or_default());
+            let internal = |m: String| boxlite::BoxliteError::Internal(format!("git json: {m}"));
+            let result = json.and_then(|j| {
+                let j = j.map_err(|e| internal(e.to_string()))?;
+                CString::new(j).map_err(|e| internal(e.to_string()))
+            });
             let event = RuntimeEvent::GitGetConfig {
                 cb,
                 user_data,

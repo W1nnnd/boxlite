@@ -10,7 +10,7 @@ Complete API reference for the BoxLite Node.js/TypeScript SDK.
 - [Runtime Management](#runtime-management)
 - [Box Handle](#box-handle)
 - [Network Tunnels](#network-tunnels)
-- [Git config](#git-config)
+- [Git](#git)
 - [Command Execution](#command-execution)
 - [Box Types](#box-types)
 - [Error Types](#error-types)
@@ -219,7 +219,7 @@ Handle to a running or stopped box.
 | `id` | `string` | Unique box identifier (ULID) |
 | `name` | `string \| null` | User-defined name |
 | `network` | `JsNetworkHandle` | Box-scoped tunnel operations |
-| `git` | `JsGitHandle` | Box-scoped git config operations |
+| `git` | `JsGitHandle` | Box-scoped git operations |
 
 #### Methods
 
@@ -313,7 +313,7 @@ connections from ordinary host applications.
 
 ---
 
-## Git config
+## Git
 
 `JsBox` and `SimpleBox` expose `box.git`. `scope` is `"global"` (default),
 `"local"`, or `"system"`; `"local"` requires `path`.
@@ -476,7 +476,7 @@ interface SimpleBoxOptions {
 |----------|------|-------------|
 | `id` | `string` | Box ID (throws if not started) |
 | `name` | `string \| undefined` | Box name |
-| `git` | `GitHandle` | Box-scoped git config operations |
+| `git` | `GitHandle` | Box-scoped git operations |
 
 #### Methods
 

@@ -149,4 +149,41 @@ describe("git config namespace", { timeout: 120_000 }, () => {
     expect(globalEmail.stdout.trim()).toBe("bot@boxlite.ai");
     expect(await box.git.getConfig("user.email")).toBe("bot@boxlite.ai");
   });
+
+  test("status and branches return structured results", async ({ skip }) => {
+    if (!gitInstalled) {
+      skip("apk add git failed");
+    }
+    await box.git.configureUser("BoxLite Bot", "bot@boxlite.ai");
+    const setup = await box.exec(
+      "sh",
+      "-c",
+      "set -e\n" +
+        "git init -q -b main /tmp/st\n" +
+        "echo hi > /tmp/st/README.md\n" +
+        "git -C /tmp/st add README.md\n" +
+        "git -C /tmp/st -c commit.gpgsign=false commit -qm init\n" +
+        "git -C /tmp/st branch feature\n",
+    );
+    expect(setup.exitCode).toBe(0);
+    const clean = await box.git.status("/tmp/st");
+    expect(clean.fileStatus).toEqual([]);
+    expect(clean.currentBranch).toBe("main");
+    expect(clean.branchPublished).toBe(false);
+
+    const dirty = await box.exec(
+      "sh",
+      "-c",
+      "echo x >> /tmp/st/README.md && echo a > '/tmp/st/with space.txt' && git -C /tmp/st add README.md",
+    );
+    expect(dirty.exitCode).toBe(0);
+    const st = await box.git.status("/tmp/st");
+    const byPath = Object.fromEntries(st.fileStatus.map((f) => [f.path, f]));
+    expect(byPath["README.md"].staged).toBe(true);
+    expect(byPath["with space.txt"].untracked).toBe(true);
+
+    const branches = await box.git.branches("/tmp/st");
+    expect(branches.current).toBe("main");
+    expect([...branches.names].sort()).toEqual(["feature", "main"]);
+  });
 });

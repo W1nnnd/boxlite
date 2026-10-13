@@ -14,7 +14,7 @@ C bindings for the BoxLite runtime, providing a stable C API for integrating Box
   - [Simple API](#simple-api)
   - [Native API](#native-api)
     - [Network Tunnels](#network-tunnels)
-    - [Git config](#git-config)
+    - [Git](#git)
   - [Error Handling](#error-handling)
 - [Complete API Reference](#complete-api-reference)
 - [Examples](#examples)
@@ -533,7 +533,7 @@ for a local tunnel.
 This differs from `boxlite_options_add_port()`, which creates a persistent,
 local-only host listener that accepts repeated connections.
 
-#### Git config
+#### Git
 
 ```c
 typedef void (*CGitWriteCb)(CBoxliteError* error, void* user_data);
@@ -575,7 +575,19 @@ BoxliteErrorCode boxlite_git_get_config(
     void* user_data,
     CBoxliteError* out_error
 );
+BoxliteErrorCode boxlite_git_status(
+    CBoxGitHandle* git, const char* path,
+    CGitGetConfigCb cb, void* user_data, CBoxliteError* out_error
+);
+BoxliteErrorCode boxlite_git_branches(
+    CBoxGitHandle* git, const char* path,
+    CGitGetConfigCb cb, void* user_data, CBoxliteError* out_error
+);
 ```
+
+`boxlite_git_status()` and `boxlite_git_branches()` deliver a JSON object
+(`current_branch`, `ahead`, `behind`, `file_status[]`, ... / `current`,
+`names[]`); free it with `boxlite_free_string()`.
 
 `scope` is `"global"` (default), `"local"`, or `"system"`. Pass NULL for
 `scope` or `path` to use the defaults. `"local"` requires `path`.
@@ -787,7 +799,7 @@ make
 
 1. **All allocated strings must be freed**
    - `boxlite_box_id()` → `boxlite_free_string()`
-   - successful `boxlite_git_get_config()` callback value → `boxlite_free_string()`
+   - successful `boxlite_git_get_config()` / `boxlite_git_status()` / `boxlite_git_branches()` callback value → `boxlite_free_string()`
 
 2. **Error structs must be freed**
    - `CBoxliteError` → `boxlite_error_free()`

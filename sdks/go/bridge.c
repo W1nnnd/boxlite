@@ -65,6 +65,8 @@ CBoxRemoveBoxCb cbRemoveBox(void) { return (CBoxRemoveBoxCb)goBoxliteOnRemoveBox
 CBoxCopyCb cbCopy(void) { return (CBoxCopyCb)goBoxliteOnCopy; }
 CGitWriteCb cbGitWrite(void) { return (CGitWriteCb)goBoxliteOnGitWrite; }
 CGitGetConfigCb cbGitGetConfig(void) { return (CGitGetConfigCb)goBoxliteOnGitGetConfig; }
+// Status/branches JSON shares the owned-string delivery of get_config.
+CGitGetConfigCb cbGitJSON(void) { return (CGitGetConfigCb)goBoxliteOnGitGetConfig; }
 
 CBoxImagePullCb cbImagePull(void) { return (CBoxImagePullCb)goBoxliteOnImagePull; }
 CBoxImageListCb cbImageList(void) { return (CBoxImageListCb)goBoxliteOnImageList; }
