@@ -362,7 +362,7 @@ print(f"Box {info.id}: {info.state.status}")
 await box.stop()
 ```
 
-### Git config
+### Git
 
 Both `boxlite.Box` and `boxlite.SimpleBox` expose `box.git`. `scope` is
 `"global"` (default), `"local"`, or `"system"`; `"local"` requires `path`.

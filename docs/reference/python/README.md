@@ -10,7 +10,7 @@ Complete API reference for the BoxLite Python SDK.
 - [Runtime Management](#runtime-management)
 - [Box Handle](#box-handle)
 - [Network Tunnels](#network-tunnels)
-- [Git config](#git-config)
+- [Git](#git)
 - [Command Execution](#command-execution)
 - [Box Types](#box-types)
 - [Sync API](#sync-api)
@@ -254,7 +254,7 @@ Handle to a running or stopped box.
 |----------|------|-------------|
 | `id` | `str` | Unique box identifier (ULID format) |
 | `network` | `NetworkHandle` | Box-scoped tunnel operations |
-| `git` | `GitHandle` | Box-scoped git config operations |
+| `git` | `GitHandle` | Box-scoped git operations |
 
 #### Methods
 
@@ -358,7 +358,7 @@ that accepts repeated connections from ordinary host applications.
 
 ---
 
-## Git config
+## Git
 
 Both `boxlite.Box` and `boxlite.SimpleBox` expose `box.git`. `scope` is
 `"global"` (default), `"local"`, or `"system"`; `"local"` requires `path`.
@@ -528,7 +528,7 @@ SimpleBox(
 | Property | Type | Description |
 |----------|------|-------------|
 | `id` | `str` | Box ID (raises if not started) |
-| `git` | `GitHandle` | Box-scoped git config operations (raises if not started) |
+| `git` | `GitHandle` | Box-scoped git operations (raises if not started) |
 
 #### Methods
 
@@ -845,7 +845,7 @@ from boxlite import SyncBoxlite, SyncBox, SyncSimpleBox, SyncCodeBox
 |-----------|----------|-------|
 | `Boxlite` | `SyncBoxlite` | `get_info()` and `list_info()` are async-only |
 | `Box` | `SyncBox` | `Box.info()` is async-only and is not exposed by `SyncBox` |
-| `GitHandle` | `SyncGitHandle` | `box.git.configure_user` / `set_config` / `get_config` |
+| `GitHandle` | `SyncGitHandle` | `box.git.configure_user` / `set_config` / `get_config` / `status` / `branches` |
 | `Execution` | `SyncExecution` | |
 | `ExecStdout` | `SyncExecStdout` | Regular iterator |
 | `ExecStderr` | `SyncExecStderr` | Regular iterator |

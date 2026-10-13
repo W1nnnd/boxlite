@@ -218,6 +218,27 @@ class TestSyncSimpleBoxGit:
             assert written.exit_code == 0, written.stderr
             assert box.git.get_config("user.email") == "other@boxlite.ai"
 
+    def test_status_and_branches(self, shared_sync_runtime):
+        with SyncSimpleBox(image="alpine:latest", runtime=shared_sync_runtime) as box:
+            _install_git_or_skip(box)
+            box.git.configure_user("BoxLite Bot", "bot@boxlite.ai")
+            setup = box.exec(
+                "sh",
+                "-c",
+                "set -e\n"
+                "git init -q -b main /tmp/repo\n"
+                "echo hi > /tmp/repo/README.md\n"
+                "git -C /tmp/repo add README.md\n"
+                "git -C /tmp/repo -c commit.gpgsign=false commit -qm init\n",
+            )
+            assert setup.exit_code == 0, setup.stderr
+            status = box.git.status("/tmp/repo")
+            branches = box.git.branches("/tmp/repo")
+            assert status.file_status == []
+            assert status.current_branch == "main"
+            assert branches.current == "main"
+            assert branches.names == ["main"]
+
 
 class TestSyncSimpleBoxConcurrentStreams:
     """Test that stdout and stderr are read concurrently in sync API.
