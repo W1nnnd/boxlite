@@ -273,6 +273,81 @@ pub unsafe extern "C" fn boxlite_git_get_config(
     }
 }
 
+/// Status of the repository at `path` as a JSON object (fields match the
+/// Rust `GitStatus`). The callback owns the string; free it with
+/// `boxlite_free_string`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn boxlite_git_status(
+    git: *mut CBoxGitHandle,
+    path: *const c_char,
+    cb: CGitGetConfigCb,
+    user_data: *mut c_void,
+    out_error: *mut CBoxliteError,
+) -> BoxliteErrorCode {
+    unsafe { git_json(git, path, cb, user_data, out_error, true) }
+}
+
+/// Local branches as a JSON object (`current`, `names`). Same ownership as
+/// `boxlite_git_status`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn boxlite_git_branches(
+    git: *mut CBoxGitHandle,
+    path: *const c_char,
+    cb: CGitGetConfigCb,
+    user_data: *mut c_void,
+    out_error: *mut CBoxliteError,
+) -> BoxliteErrorCode {
+    unsafe { git_json(git, path, cb, user_data, out_error, false) }
+}
+
+unsafe fn git_json(
+    git: *mut CBoxGitHandle,
+    path: *const c_char,
+    cb: CGitGetConfigCb,
+    user_data: *mut c_void,
+    out_error: *mut CBoxliteError,
+    status: bool,
+) -> BoxliteErrorCode {
+    unsafe {
+        if git.is_null() {
+            write_error(out_error, null_pointer_error("git"));
+            return BoxliteErrorCode::InvalidArgument;
+        }
+        let path = match c_str_to_string(path) {
+            Ok(path) => path,
+            Err(error) => {
+                write_error(out_error, error);
+                return BoxliteErrorCode::InvalidArgument;
+            }
+        };
+        let cb = crate::unwrap_cb_or_return!(cb, out_error);
+        let git_ref = &*git;
+        let (handle, queue) = (git_ref.handle.clone(), git_ref.queue.clone());
+        let user_data = user_data as usize;
+        git_ref.tokio_rt.spawn(async move {
+            let json = match status {
+                true => handle
+                    .status(&path)
+                    .await
+                    .map(|v| serde_json::to_string(&v)),
+                false => handle
+                    .branches(&path)
+                    .await
+                    .map(|v| serde_json::to_string(&v)),
+            };
+            // serde_json output never contains NUL, so both conversions hold.
+            let result = json.map(|j| CString::new(j.unwrap_or_default()).unwrap_or_default());
+            let event = RuntimeEvent::GitGetConfig {
+                cb,
+                user_data,
+                result,
+            };
+            push_event(&queue, event).await;
+        });
+        BoxliteErrorCode::Ok
+    }
+}
+
 unsafe fn optional_c_string(value: *const c_char) -> Result<Option<String>, boxlite::BoxliteError> {
     if value.is_null() {
         return Ok(None);

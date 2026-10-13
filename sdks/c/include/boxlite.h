@@ -877,6 +877,23 @@ enum BoxliteErrorCode boxlite_git_get_config(CBoxGitHandle *git,
                                              void *user_data,
                                              CBoxliteError *out_error);
 
+// Status of the repository at `path` as a JSON object (fields match the
+// Rust `GitStatus`). The callback owns the string; free it with
+// `boxlite_free_string`.
+enum BoxliteErrorCode boxlite_git_status(CBoxGitHandle *git,
+                                         const char *path,
+                                         CGitGetConfigCb cb,
+                                         void *user_data,
+                                         CBoxliteError *out_error);
+
+// Local branches as a JSON object (`current`, `names`). Same ownership as
+// `boxlite_git_status`.
+enum BoxliteErrorCode boxlite_git_branches(CBoxGitHandle *git,
+                                           const char *path,
+                                           CGitGetConfigCb cb,
+                                           void *user_data,
+                                           CBoxliteError *out_error);
+
 enum BoxliteErrorCode boxlite_image_pull(CBoxliteImageHandle *handle,
                                          const char *image_ref,
                                          CBoxImagePullCb cb,

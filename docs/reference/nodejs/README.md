@@ -323,6 +323,8 @@ connections from ordinary host applications.
 | Configure user | `await box.git.configureUser(name, email, scope?, path?)` | Set `user.name` and `user.email` |
 | Set config | `await box.git.setConfig(key, value, scope?, path?)` | Write a git config value |
 | Get config | `await box.git.getConfig(key, scope?, path?) => Promise<string>` | Read a git config value |
+| Status | `await box.git.status(path) => Promise<JsGitStatus>` | Structured working-tree status |
+| Branches | `await box.git.branches(path) => Promise<JsGitBranches>` | Local branches plus the current one |
 
 ```typescript
 await box.git.configureUser("BoxLite Bot", "bot@boxlite.ai");
@@ -338,6 +340,12 @@ const email = await box.git.getConfig(
   "/workspace/repo",
 );
 ```
+
+`JsGitStatus` has `currentBranch` (null when detached), `upstream`, `ahead`,
+`behind`, `branchPublished`, `headCommit` (null on an unborn branch), and
+`fileStatus: JsGitFileStatus[]` (empty when clean). Each entry has `path`,
+`origPath`, `indexStatus`, `worktreeStatus`, `staged`, `untracked`.
+`JsGitBranches` has `current` and `names`.
 
 ---
 
