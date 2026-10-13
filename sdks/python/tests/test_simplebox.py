@@ -167,3 +167,29 @@ async def test_git_status_and_branches_are_structured(shared_runtime):
         b = await box.git.branches("/tmp/repo")
         assert b.current == "main"
         assert sorted(b.names) == ["feature", "main"]
+
+
+async def test_git_status_unborn_and_detached_head(shared_runtime):
+    async with boxlite.SimpleBox(image="alpine:latest", runtime=shared_runtime) as box:
+        await _install_git_or_skip(box)
+        await box.git.configure_user("BoxLite Bot", "bot@boxlite.ai")
+        init = await box.exec("git", "init", "-q", "-b", "trunk", "/tmp/repo")
+        assert init.exit_code == 0, init.stderr
+
+        st = await box.git.status("/tmp/repo")
+        assert (st.current_branch, st.head_commit) == ("trunk", None)
+        b = await box.git.branches("/tmp/repo")
+        assert (b.current, b.names) == ("trunk", [])
+
+        detach = await box.exec(
+            "sh",
+            "-c",
+            "set -e\n"
+            "git -C /tmp/repo -c commit.gpgsign=false commit -q --allow-empty -m one\n"
+            "git -C /tmp/repo checkout -q --detach\n",
+        )
+        assert detach.exit_code == 0, detach.stderr
+        st = await box.git.status("/tmp/repo")
+        assert st.current_branch is None and st.head_commit
+        b = await box.git.branches("/tmp/repo")
+        assert (b.current, b.names) == (None, ["trunk"])

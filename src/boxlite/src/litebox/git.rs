@@ -43,7 +43,7 @@ impl GitConfigScope {
 /// instead of passing git's "Please tell me who you are" through verbatim.
 ///
 /// `git config` never emits that message; `commit()` will call this.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "used by upcoming commit()")]
 fn map_git_failure(stderr: &str, fallback: impl Into<String>) -> BoxliteError {
     if stderr.contains("Please tell me who you are") {
         BoxliteError::InvalidArgument(
@@ -97,53 +97,70 @@ pub struct GitBranches {
     pub names: Vec<String>,
 }
 
-/// Parse `git status --porcelain=v2 --branch -z` output.
+/// Parse `git status --porcelain=v2 --branch -z` output. Guest output is
+/// untrusted: malformed or unknown records return an error, never panic.
 fn parse_status_v2(out: &str) -> BoxliteResult<GitStatus> {
     let bad = || BoxliteError::Internal("unexpected git status output".into());
     let mut st = GitStatus::default();
     let mut records = out.split('\0').filter(|r| !r.is_empty());
     while let Some(rec) = records.next() {
-        let entry = |xy: &str, path: &str, orig_path| GitFileStatus {
-            path: path.into(),
-            orig_path,
-            index_status: xy[..1].into(),
-            worktree_status: xy[1..].into(),
-        };
-        // Field count before the path: 1 = 8, 2 (rename) = 9, u (unmerged) = 10.
-        let fields = match rec.as_bytes()[0] {
-            b'1' => 9,
-            b'2' => 10,
-            b'u' => 11,
-            b'?' => {
-                st.file_status.push(entry("??", &rec[2..], None));
+        let (kind, rest) = rec.split_once(' ').ok_or_else(bad)?;
+        // Space-separated fields after the kind, the path last:
+        // 1 = XY + 6 + path, 2 (rename) = XY + 7 + path, u (unmerged) = XY + 8 + path.
+        let fields = match kind {
+            "#" => {
+                parse_status_header(&mut st, rest).ok_or_else(bad)?;
                 continue;
             }
-            _ => 0,
-        };
-        if fields > 0 {
-            let parts: Vec<&str> = rec.splitn(fields, ' ').collect();
-            let (xy, path) = (parts.get(1).ok_or_else(bad)?, parts.last().ok_or_else(bad)?);
-            let orig = (fields == 10).then(|| records.next().map(String::from));
-            st.file_status.push(entry(xy, path, orig.flatten()));
-            continue;
-        }
-        let Some((key, val)) = rec.strip_prefix("# ").and_then(|h| h.split_once(' ')) else {
-            continue;
-        };
-        match key {
-            "branch.oid" => st.head_commit = (val != "(initial)").then(|| val.into()),
-            "branch.head" => st.current_branch = (val != "(detached)").then(|| val.into()),
-            "branch.upstream" => st.upstream = Some(val.into()),
-            "branch.ab" => {
-                let (a, b) = val.split_once(" -").ok_or_else(bad)?;
-                st.ahead = a.trim_start_matches('+').parse().map_err(|_| bad())?;
-                st.behind = b.parse().map_err(|_| bad())?;
-                st.branch_published = true;
+            "?" => {
+                st.file_status
+                    .push(file_entry("??", rest, None).ok_or_else(bad)?);
+                continue;
             }
-            _ => {}
+            "1" => 8,
+            "2" => 9,
+            "u" => 10,
+            _ => return Err(bad()),
+        };
+        let parts: Vec<&str> = rest.splitn(fields, ' ').collect();
+        if parts.len() != fields {
+            return Err(bad());
         }
+        let orig = match kind {
+            "2" => Some(records.next().ok_or_else(bad)?.to_string()),
+            _ => None,
+        };
+        st.file_status
+            .push(file_entry(parts[0], parts[fields - 1], orig).ok_or_else(bad)?);
     }
     Ok(st)
+}
+
+fn file_entry(xy: &str, path: &str, orig_path: Option<String>) -> Option<GitFileStatus> {
+    let (x, y) = (xy.get(..1)?, xy.get(1..)?);
+    (xy.len() == 2 && xy.is_ascii() && !path.is_empty()).then(|| GitFileStatus {
+        path: path.into(),
+        orig_path,
+        index_status: x.into(),
+        worktree_status: y.into(),
+    })
+}
+
+/// Apply one `# branch.*` header; unknown headers are ignored.
+fn parse_status_header(st: &mut GitStatus, header: &str) -> Option<()> {
+    let (key, val) = header.split_once(' ')?;
+    match key {
+        "branch.oid" => st.head_commit = (val != "(initial)").then(|| val.into()),
+        "branch.head" => st.current_branch = (val != "(detached)").then(|| val.into()),
+        "branch.upstream" => st.upstream = Some(val.into()),
+        "branch.ab" => {
+            let (a, b) = val.strip_prefix('+')?.split_once(" -")?;
+            (st.ahead, st.behind) = (a.parse().ok()?, b.parse().ok()?);
+            st.branch_published = true;
+        }
+        _ => {}
+    }
+    Some(())
 }
 
 /// Parse `git for-each-ref --format=%(HEAD)%00%(refname:short)` output.
@@ -165,6 +182,12 @@ fn parse_branches(out: &str) -> GitBranches {
 #[derive(Clone)]
 pub struct GitHandle {
     box_backend: Arc<dyn BoxBackend>,
+}
+
+impl std::fmt::Debug for GitHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHandle").finish_non_exhaustive()
+    }
 }
 
 impl GitHandle {
@@ -362,6 +385,25 @@ mod tests {
         assert!(f[0].worktree_status == "M" && !f[0].is_staged() && f[1].is_staged());
         assert_eq!(f[2].orig_path.as_deref(), Some("old name"));
         assert!(f[3].index_status == "U" && f[4].is_untracked());
+    }
+
+    #[test]
+    fn status_rejects_malformed_records() {
+        let h = "0".repeat(40);
+        for rec in [
+            "?".to_string(),
+            "? ".into(),
+            "1 .M N... 100644".into(),
+            format!("1 é N... 100644 100644 100644 {h} {h} p"),
+            format!("1 M N... 100644 100644 100644 {h} {h} p"),
+            format!("2 R. N... 100644 100644 100644 {h} {h} R100 new"),
+            "! ignored".into(),
+            "x unknown".into(),
+            "# branch.ab 1 2".into(),
+        ] {
+            assert!(parse_status_v2(&format!("{rec}\0")).is_err(), "{rec:?}");
+        }
+        assert!(parse_status_v2("# future.header x\0").is_ok());
     }
 
     #[test]

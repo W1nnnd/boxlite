@@ -22,7 +22,7 @@ The Rust SDK is the core implementation of BoxLite. It provides async-first APIs
   - [BoxStatus](#boxstatus)
   - [BoxState](#boxstate)
 - [Network Tunnels](#network-tunnels)
-- [Git config](#git-config)
+- [Git](#git)
 - [Command Execution](#command-execution)
   - [BoxCommand](#boxcommand)
   - [Execution](#execution)
@@ -450,7 +450,7 @@ Dropping the final handle requests cancellation.
 
 ---
 
-## Git config
+## Git
 
 `LiteBox::git()` returns a `GitHandle` that owns a backend clone and does not
 borrow the originating `LiteBox`. `scope` is `"global"` (default), `"local"`,
@@ -480,7 +480,7 @@ let email = git
     .await?;
 ```
 
-The handle runs `git config` through the box backend, so the same methods work
+The handle runs `git` through the box backend, so the same methods work
 on a local runtime and against a served REST runtime.
 
 `GitStatus` has `current_branch: Option<String>` (`None` when HEAD is

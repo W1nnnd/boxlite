@@ -201,5 +201,23 @@ async fn git_config_reaches_guest() {
         "global user.email changed"
     );
 
+    // status()/branches() on the unborn repo, with a file name containing a space.
+    run_stdout(
+        &tb.handle,
+        BoxCommand::new("sh").args(["-c", "echo x > '/tmp/repo/with space.txt'"]),
+    )
+    .await;
+    let st = git.status("/tmp/repo").await.expect("status");
+    assert!(st.head_commit.is_none(), "fresh repo must be unborn");
+    assert_eq!(st.file_status.len(), 1);
+    assert_eq!(st.file_status[0].path, "with space.txt");
+    assert!(st.file_status[0].is_untracked());
+    let branches = git.branches("/tmp/repo").await.expect("branches");
+    assert!(
+        branches.current.is_some(),
+        "unborn branch must still be current"
+    );
+    assert_eq!(branches.current, st.current_branch);
+
     tb.teardown().await;
 }
