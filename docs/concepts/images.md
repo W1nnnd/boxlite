@@ -2,6 +2,29 @@
 
 BoxLite uses OCI-compatible container images with intelligent caching.
 
+## Startup command overrides
+
+An image's `ENTRYPOINT` and `CMD` form the container's main command.
+`BoxOptions.entrypoint` replaces the image's entrypoint; a nonempty override also
+discards the image's default CMD.
+Use `BoxOptions.cmd` to supply new arguments.
+
+| User entrypoint | User cmd | Main command |
+| --- | --- | --- |
+| Omitted | Omitted or empty | Image ENTRYPOINT + image CMD |
+| Omitted | Nonempty | Image ENTRYPOINT + user cmd |
+| Nonempty | Omitted or empty | User entrypoint only |
+| Nonempty | Nonempty | User entrypoint + user cmd |
+
+For an image with `CMD ["sleep", "infinity"]`, setting
+`entrypoint=["python3", "-m", "http.server", "8080"]` runs that HTTP server
+without appending `sleep infinity`. The CLI's `--entrypoint EXEC` and trailing
+`COMMAND` use the same override rules.
+
+These rules apply on every start, including existing boxes. Earlier releases
+appended the image CMD to nonempty entrypoint overrides. To keep those arguments,
+set `cmd` explicitly when creating the box.
+
 ## Image pull flow
 
 ```text
@@ -55,3 +78,20 @@ With nothing cached, a rate limit is reported as a resource-exhausted error that
 retry later. A registry that answers, for example that the image does not exist, is
 reported as an error. `images().pull()` answers from the cache first and does not re-check
 a cached tag.
+
+## Registry tags and catalog aliases
+
+A registry tag is an upstream name for a manifest digest. A BoxLite alias is
+an organization-scoped catalog binding to a recorded version. A successful
+registry pull seeds an alias using the tag it resolved; later pulls never
+silently replace that binding.
+
+REST image handles expose `create_alias(name, alias, digest)` and
+`delete_alias(name, alias)`. Creation rejects every existing name with
+`AlreadyExists`, including requests for the same digest. Changing a binding
+requires explicit deletion followed by creation. Deletion leaves versions and
+existing boxes unchanged; neither operation updates the upstream registry.
+
+Registry credentials are managed through `runtime.images.registries` in Python
+and Node, `runtime.images()?.registries()?` in Rust and `images.Registries()` in
+Go. Embedded runtimes use their configured image registry logins instead.

@@ -48,6 +48,7 @@ from ._execution import SyncExecStderr, SyncExecStdout, SyncExecution
 from ._git import SyncGitHandle
 from ._images import SyncImageHandle
 from ._network import SyncNetworkHandle, SyncTunnelForwarder
+from ._registries import SyncRegistryHandle
 from ._simplebox import SyncSimpleBox
 from ._skillbox import SyncSkillBox
 from ._sync_base import SyncBase, SyncContextManager
@@ -63,6 +64,7 @@ __all__ = [  # noqa: RUF022 - grouped by API area, not alphabetical
     "SyncGitHandle",
     "SyncImageHandle",
     "SyncNetworkHandle",
+    "SyncRegistryHandle",
     "SyncTunnelForwarder",
     "SyncExecution",
     "SyncExecStdout",

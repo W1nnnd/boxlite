@@ -47,6 +47,7 @@ export const awsStackProviders = ({
   dashboardDomain = null,
   artifactsBucket,
   managedClickHouse,
+  otelOpenapiEnabled = false,
 }: {
   stage: string
   region: string
@@ -63,6 +64,7 @@ export const awsStackProviders = ({
    * and one with `mode: managed` and no endpoint is refused by the provider.
    */
   managedClickHouse: { url: string; writerSecretArn: string; readerSecretArn: string } | null
+  otelOpenapiEnabled?: boolean
 }): StackProviders => {
   /*
    * One DNS adapter for every record this stack writes.
@@ -84,7 +86,7 @@ export const awsStackProviders = ({
     database: ({ network }) => awsDatabaseProvider({ network: binding(network) }),
     cache: ({ network }) => awsCacheProvider({ network: binding(network) }),
     clickhouse: ({ network }) =>
-      awsClickHouseProvider({ network: binding(network), region, managed: managedClickHouse }),
+      awsClickHouseProvider({ network: binding(network), region, managed: managedClickHouse, otelOpenapiEnabled }),
     mail: awsMailProvider({ region, dns }),
     collector: ({ host: where, clickhouse, dependsOn }) =>
       awsCollectorProvider({ host: host(where), clickhouse, dependsOn }),
@@ -103,6 +105,7 @@ export const awsStackProviders = ({
      * and reports no proxy, which is the truth.
      */
     registryProxy: () => () => ({ active: false }),
+    registryCredentials: () => ({ active: false }),
     // 64 alphanumeric characters: the value travels through a systemd
     // EnvironmentFile and a JSON payload, and punctuation would drag quoting
     // rules into both.

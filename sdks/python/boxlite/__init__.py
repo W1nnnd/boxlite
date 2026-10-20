@@ -33,10 +33,14 @@ try:
         HealthCheckOptions,
         HealthState,
         HealthStatus,
+        ImageAliasEvent,
+        ImageDetail,
         ImageHandle,
         ImageInfo,
         ImagePullResult,
         ImageRegistry,
+        ImageUsage,
+        ImageVersion,
         InboundNetworkInfo,
         InboundNetworkSpec,
         NetworkHandle,
@@ -46,6 +50,8 @@ try:
         OutboundNetworkInfo,
         OutboundNetworkSpec,
         PublishedPort,
+        RegistryCredential,
+        RegistryHandle,
         RuntimeMetrics,
         Secret,
         SecurityOptions,
@@ -89,6 +95,10 @@ try:
         "ImageHandle",
         "ImageInfo",
         "ImagePullResult",
+        "ImageDetail",
+        "ImageVersion",
+        "ImageAliasEvent",
+        "ImageUsage",
         "BoxInfo",
         "BoxStateInfo",
         "HealthState",
@@ -107,6 +117,8 @@ try:
         "ExportOptions",
         "VolumeHandle",
         "VolumeInfo",
+        "RegistryHandle",
+        "RegistryCredential",
     ]
     # Credential abstraction (ABC + virtual-registered native classes)
     from .credential import Credential  # noqa: F401
@@ -119,21 +131,19 @@ except ImportError as e:
 # Import Python convenience wrappers (re-exported via __all__)
 try:
     from .codebox import CodeBox  # noqa: F401
-    from .errors import BoxliteError, ExecError, ParseError, TimeoutError  # noqa: F401
+    from .errors import *  # every error type, listed once in errors.__all__
+    from .errors import __all__ as _error_types
     from .exec import ExecResult  # noqa: F401
     from .simplebox import SimpleBox  # noqa: F401
 
     __all__.extend(
-        [  # noqa: RUF022 - grouped by API area, not alphabetical
+        [  # grouped by API area, not alphabetical
             # Python convenience wrappers
             "SimpleBox",
             "CodeBox",
             "ExecResult",
             # Error types
-            "BoxliteError",
-            "ExecError",
-            "TimeoutError",
-            "ParseError",
+            *_error_types,
         ]
     )
 except ImportError:
@@ -189,6 +199,7 @@ try:
         SyncGitHandle,
         SyncImageHandle,
         SyncNetworkHandle,
+        SyncRegistryHandle,
         SyncSimpleBox,
         SyncSkillBox,
         SyncTunnelForwarder,
@@ -205,6 +216,7 @@ try:
             "SyncGitHandle",
             "SyncImageHandle",
             "SyncNetworkHandle",
+            "SyncRegistryHandle",
             "SyncSimpleBox",
             "SyncSkillBox",
             "SyncTunnelForwarder",

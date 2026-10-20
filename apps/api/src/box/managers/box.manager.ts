@@ -41,7 +41,10 @@ import { BoxRepository } from '../repositories/box.repository'
 import { getStateChangeLockKey } from '../utils/lock-key.util'
 import { OnAsyncEvent } from '../../common/decorators/on-async-event.decorator'
 import { sanitizeBoxError } from '../utils/sanitize-error.util'
-import { recordBusinessEvent } from '../../common/utils/business-event.util'
+import { recordBoxRequested } from '../utils/box-business-event.util'
+import { Context } from '../../common/context/context'
+import { PlatformReason } from '../../common/context/platform-reason.enum'
+import { ImagePullFailureService } from '../../image/services/image-pull-failure.service'
 
 @Injectable()
 export class BoxManager implements TrackableJobExecutions, OnApplicationShutdown {
@@ -57,6 +60,7 @@ export class BoxManager implements TrackableJobExecutions, OnApplicationShutdown
     private readonly boxStartAction: BoxStartAction,
     private readonly boxStopAction: BoxStopAction,
     private readonly boxDestroyAction: BoxDestroyAction,
+    private readonly imagePullFailureService: ImagePullFailureService,
   ) {}
 
   async onApplicationShutdown() {
@@ -137,13 +141,7 @@ export class BoxManager implements TrackableJobExecutions, OnApplicationShutdown
                   },
                 })
 
-                recordBusinessEvent({
-                  name: 'box.stop',
-                  outcome: 'requested',
-                  correlationId: box.id,
-                  orgId: box.organizationId,
-                  actorKind: 'auto_stop',
-                })
+                recordBoxRequested('box.stop', box.id, Context.platform(PlatformReason.AUTO_STOP))
 
                 this.syncInstanceState(box.id).catch(this.logger.error)
               } catch (error) {
@@ -218,13 +216,7 @@ export class BoxManager implements TrackableJobExecutions, OnApplicationShutdown
                   },
                 })
 
-                recordBusinessEvent({
-                  name: 'box.delete',
-                  outcome: 'requested',
-                  correlationId: box.id,
-                  orgId: box.organizationId,
-                  actorKind: 'auto_delete',
-                })
+                recordBoxRequested('box.delete', box.id, Context.platform(PlatformReason.AUTO_DELETE))
 
                 this.syncInstanceState(box.id).catch(this.logger.error)
               } catch (error) {
@@ -397,7 +389,9 @@ export class BoxManager implements TrackableJobExecutions, OnApplicationShutdown
 
           const updateData: Partial<Box> = {
             state: BoxState.ERROR,
-            errorReason,
+            // A runner that pulls while it answers the call, rather than in a
+            // job, reports a failed pull here.
+            errorReason: await this.imagePullFailureService.reasonFor(box, errorReason),
             recoverable,
           }
 

@@ -19,7 +19,7 @@
  */
 
 import { publishClickStack } from './clickstack.ts'
-import { renderClickHouseSchema } from '../../clickhouse-host.ts'
+import { OPENAPI_READER_USERNAME, renderClickHouseLogReaderSql, renderClickHouseSchema } from '../../clickhouse-host.ts'
 import type { ClickHouse, ClickHouseProvider, ClickHouseRequest } from '../../clickhouse.ts'
 import type { NetworkBinding } from '../../network.ts'
 import { identityFor, instanceFor } from 'naming'
@@ -126,6 +126,7 @@ export const clickHouseStartupScript = ({
   adminRef,
   writerRef,
   readerRef,
+  openapiReaderRef = null,
 }: {
   database: string
   writerUsername: string
@@ -134,6 +135,7 @@ export const clickHouseStartupScript = ({
   adminRef: string
   writerRef: string
   readerRef: string
+  openapiReaderRef?: string | null
 }): string => `#!/bin/bash
 set -euo pipefail
 # The console as well as the file. Nobody can SSH to this host — OS Login
@@ -238,7 +240,14 @@ clickhouse-client --query "CREATE USER OR REPLACE ${readerUsername} IDENTIFIED W
 # grants the AWS reconcile makes.
 clickhouse-client --query "GRANT SELECT, INSERT, SHOW COLUMNS ON ${database}.* TO ${writerUsername}"
 clickhouse-client --query "GRANT SELECT, SHOW COLUMNS ON ${database}.* TO ${readerUsername}"
-echo "clickhouse setup complete"
+${openapiReaderRef ? `# Reconcile the dedicated reader with its managed credential.
+LOG_READER_PASSWORD=$(read_secret '${openapiReaderRef.replaceAll("'", `'"'"'`)}')
+test -n "$LOG_READER_PASSWORD"
+LOG_READER_HASH=$(hash_of "$LOG_READER_PASSWORD")
+clickhouse-client --multiquery <<SQL
+${renderClickHouseLogReaderSql().replaceAll('__PASSWORD_SHA256__', '$LOG_READER_HASH')}SQL
+unset LOG_READER_PASSWORD LOG_READER_HASH
+` : ''}echo "clickhouse setup complete"
 `
 
 export const gcpClickHouseProvider =
@@ -252,6 +261,7 @@ export const gcpClickHouseProvider =
     clickStackConsumerProject,
     clickStackConsumerAccount,
     managed,
+    otelOpenapiEnabled = false,
     dependsOn,
   }: {
     network: Extract<NetworkBinding, { cloud: 'gcp' }>
@@ -288,9 +298,14 @@ export const gcpClickHouseProvider =
     /** The identity let read the reader password, or null to grant nobody. */
     clickStackConsumerAccount: string | null
     managed: { url: string; writerSecretArn: string; readerSecretArn: string } | null
+    otelOpenapiEnabled?: boolean
     dependsOn: any[]
   }): ClickHouseProvider =>
   (request: ClickHouseRequest): ClickHouse => {
+    if (otelOpenapiEnabled && (request.mode !== 'self-hosted' || request.database !== 'otel' ||
+      [request.writerUsername, request.readerUsername].includes(OPENAPI_READER_USERNAME))) {
+      throw new Error('OTEL_OPENAPI_ENABLED requires self-hosted otel and a separate reader account')
+    }
     if (request.mode === 'disabled') return { active: false, mode: 'disabled' }
 
     if (request.mode === 'managed') {
@@ -343,14 +358,18 @@ export const gcpClickHouseProvider =
       instanceFor({ app: $app.name, stage: $app.stage, artifact: 'clickhouse-reader' }),
     )
 
+    const openapiReader = otelOpenapiEnabled ? clickHouseSecret(
+      'ClickHouseOpenapiReaderSecret', project,
+      instanceFor({ app: $app.name, stage: $app.stage, artifact: 'clickhouse-openapi-reader' }),
+    ) : null
+
     const host = new gcp.serviceaccount.Account('ClickHouseServiceAccount', {
       project,
       accountId: identityFor({ appShort, stage: $app.stage, artifact: 'clickhouse', action: 'run' }),
       displayName: `BoxLite ClickHouse (${$app.stage})`,
     })
-    // Each secret named individually rather than a project-wide accessor role:
-    // the host reads exactly its own three and nothing else in the project.
-    const access = [admin, writer, reader].map(
+    // Name each credential individually, including the optional dedicated reader below.
+    const access = [admin, writer, reader, ...(openapiReader ? [openapiReader] : [])].map(
       ({ secret }, index) =>
         new gcp.secretmanager.SecretIamMember(`ClickHouseSecretAccess${index}`, {
           project,
@@ -380,8 +399,8 @@ export const gcpClickHouseProvider =
       { retainOnDelete: true },
     )
 
-    const startupScript = $resolve([admin.version.name, writer.version.name, reader.version.name]).apply(
-      ([adminRef, writerRef, readerRef]) =>
+    const startupScript = $resolve([admin.version.name, writer.version.name, reader.version.name, ...(openapiReader ? [openapiReader.version.name] : [])]).apply(
+      ([adminRef, writerRef, readerRef, openapiReaderRef]) =>
         clickHouseStartupScript({
           database: request.database,
           writerUsername: request.writerUsername,
@@ -389,6 +408,7 @@ export const gcpClickHouseProvider =
           adminRef,
           writerRef,
           readerRef,
+          openapiReaderRef,
         }),
     )
 
@@ -486,7 +506,7 @@ export const gcpClickHouseProvider =
       zone,
       network: network.network,
       subnetwork: network.subnetwork,
-      instanceLink: instance.selfLink,
+      instance,
       hostAccount: host.email,
       port: HTTP_PORT,
       consumerProject: clickStackConsumerProject,

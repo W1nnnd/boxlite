@@ -340,7 +340,8 @@ pub struct OutboundNetworkInfo {
 
 /// Network configuration for inbound (internet → guest) traffic.
 ///
-/// Records whether the guest's exposed ports/preview are publicly reachable.
+/// Records whether the guest's exposed ports/preview are reachable without
+/// sign-in.
 /// `allow_net` is always empty today — an inbound allowlist is not yet
 /// enforced by any layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,7 +351,7 @@ pub struct InboundNetworkInfo {
     pub allow_net: Vec<String>,
 }
 
-/// Metadata that omits inbound reads as private, matching the inbound
+/// Metadata that omits inbound reads as disabled, matching the inbound
 /// default of [`BoxOptions`](crate::runtime::options::BoxOptions).
 impl Default for InboundNetworkInfo {
     fn default() -> Self {
@@ -373,7 +374,7 @@ pub struct NetworkInfo {
     pub outbound: OutboundNetworkInfo,
 
     /// External reachability: whether the box's exposed ports/preview are
-    /// public. Its `allow_net` is always empty today (see
+    /// reachable without sign-in. Its `allow_net` is always empty today (see
     /// [`InboundNetworkInfo::allow_net`]).
     pub inbound: InboundNetworkInfo,
 
@@ -669,7 +670,8 @@ pub struct ImageInfo {
     /// Full image reference (e.g., "docker.io/library/alpine:latest")
     pub reference: String,
 
-    /// Parsed repository name (e.g. "docker.io/library/alpine")
+    /// Registry and repository, without a tag (e.g. "docker.io/library/alpine"):
+    /// the name `ImageHandle::get` and `ImageHandle::remove` take.
     pub repository: String,
 
     /// Parsed image tag (e.g. "latest")
@@ -684,6 +686,94 @@ pub struct ImageInfo {
 
     /// Image size in bytes (if available)
     pub size: Option<Bytes>,
+}
+
+/// One image name and every build of it the runtime holds.
+///
+/// Locally that is the cache's entries under the name; on a REST runtime it
+/// is the server's catalog entry, including images the operator provides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageDetail {
+    /// Registry and repository, without a tag (e.g. "docker.io/library/alpine").
+    pub name: String,
+
+    /// Aliases held for this name.
+    pub aliases: Vec<String>,
+
+    /// Provided by the operator rather than pulled by a box. Only a catalog
+    /// has these; a local cache never does.
+    pub curated: bool,
+
+    /// Each build held under the name, newest first.
+    pub versions: Vec<ImageVersion>,
+
+    /// Where each tag has pointed, newest first. Only a catalog keeps it, and
+    /// only its most recent moves; a local cache answers it empty.
+    #[serde(default)]
+    pub history: Vec<ImageAliasEvent>,
+}
+
+/// One build of an image.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageVersion {
+    /// Manifest digest (e.g. "sha256:…").
+    pub digest: String,
+
+    /// Sum of the layer sizes the manifest declares, when known.
+    pub size_bytes: Option<u64>,
+
+    /// The reference that was pulled to get this build.
+    pub source_ref: String,
+
+    /// When this build was recorded.
+    pub recorded_at: DateTime<Utc>,
+
+    /// Aliases that point at this build now.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+
+    /// When a box last started from this build, when that is known. Only a
+    /// catalog tracks it.
+    #[serde(default)]
+    pub last_used_at: Option<DateTime<Utc>>,
+
+    /// When a pull first found this build gone from its registry. Runners
+    /// that cached it still start it. Only a catalog records it.
+    #[serde(default)]
+    pub upstream_missing_at: Option<DateTime<Utc>>,
+}
+
+/// A catalog alias registration or a historical binding change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAliasEvent {
+    /// The alias that was recorded.
+    pub alias: String,
+
+    /// The build it pointed at before; `None` when the alias did not exist yet.
+    pub from_digest: Option<String>,
+
+    /// The build it points at from then on.
+    pub to_digest: String,
+
+    /// Who recorded it; `None` when a pull recorded it.
+    pub actor: Option<String>,
+
+    /// When the binding was recorded.
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// How much of its image allowance a REST runtime's caller holds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUsage {
+    /// Images held.
+    pub count: u64,
+
+    /// Images the caller may hold.
+    pub limit: u64,
+
+    /// Sum of the sizes the held builds' manifests declare. Not the bytes
+    /// stored: a layer two builds share is counted for each of them.
+    pub known_bytes: u64,
 }
 
 // ============================================================================
@@ -720,7 +810,7 @@ mod tests {
             network.outbound.allow_net,
             vec!["api.example.com".to_string()]
         );
-        // The direction the pre-split shape could not express reads as private.
+        // The direction the pre-split shape could not express reads as disabled.
         assert_eq!(network.inbound.mode, NetworkMode::Disabled);
         assert!(network.inbound.allow_net.is_empty());
         // And the deprecated mirrors follow outbound.

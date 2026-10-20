@@ -9,7 +9,9 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -34,13 +36,13 @@ func (p *Proxy) handleTunnelConnect(writer http.ResponseWriter, request *http.Re
 		http.Error(writer, err.Error(), http.StatusBadRequest)
 		return
 	}
-	isPublic, err := p.getBoxPublic(request.Context(), boxID)
+	inboundEnabled, err := p.getBoxInboundEnabled(request.Context(), boxID)
 	if err != nil {
-		http.Error(writer, "box visibility unavailable", http.StatusBadGateway)
+		http.Error(writer, "box inbound mode unavailable", http.StatusBadGateway)
 		return
 	}
-	if !*isPublic {
-		http.Error(writer, "box is not public", http.StatusForbidden)
+	if !*inboundEnabled {
+		http.Error(writer, "box inbound access is disabled", http.StatusForbidden)
 		return
 	}
 	allowed, err := p.hasPublicTunnelAccess(request.Context(), boxID, port)
@@ -62,15 +64,10 @@ func (p *Proxy) handleTunnelConnect(writer http.ResponseWriter, request *http.Re
 	defer activityPoll.stop()
 	go p.updateLastActivity(context.WithoutCancel(request.Context()), boxID, true, activityPoll.done)
 
-	runnerInfo, err := p.getBoxRunnerInfo(request.Context(), boxID)
+	runnerConn, err := p.dialGuestPortWithWake(request.Context(), boxID, port)
 	if err != nil {
-		http.Error(writer, "runner unavailable", http.StatusBadGateway)
-		return
-	}
-
-	runnerConn, err := dialRunnerTunnel(request.Context(), runnerInfo, boxID, port)
-	if err != nil {
-		http.Error(writer, "runner tunnel unavailable", http.StatusBadGateway)
+		failure := guestDialFailure(writer.Header(), err)
+		http.Error(writer, failure.Message, failure.StatusCode)
 		return
 	}
 	defer runnerConn.Close()
@@ -175,9 +172,13 @@ func dialRunnerTunnel(ctx context.Context, runnerInfo *RunnerInfo, boxID string,
 		return nil, err
 	}
 	if response.StatusCode != http.StatusOK {
+		var body struct {
+			Code string `json:"code"`
+		}
+		_ = json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&body)
 		response.Body.Close()
 		conn.Close()
-		return nil, fmt.Errorf("runner CONNECT returned %s", response.Status)
+		return nil, &runnerTunnelError{statusCode: response.StatusCode, code: body.Code}
 	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		conn.Close()

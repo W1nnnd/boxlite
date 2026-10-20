@@ -85,11 +85,83 @@ describe('ApiClient 401 -> bounded re-login recovery', () => {
     expect(error).not.toBeInstanceOf(EmailVerificationRequiredError)
   })
 
+  // The catalog's delete refusal is only useful for the box ids in its message;
+  // an image client built outside the shared instance would hand the page a
+  // raw axios error and the toast would fall back to a generic line.
+  it('image requests share the error handling: a 409 refusal keeps the box ids', async () => {
+    const refusal = "Image 'quay.io/acme/app' cannot be removed while 2 box(es) can still boot from it: box-1, box-2"
+    const onUnauthorized = vi.fn(() => Promise.resolve())
+    const api = await makeClient(onUnauthorized, 409, { statusCode: 409, error: 'Conflict', message: refusal })
+
+    const { BoxliteError } = await import('./errors')
+
+    const error = await api.imageApi.deleteImage('img-1', 'org-1').catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(BoxliteError)
+    expect((error as Error).message).toBe(refusal)
+    expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+
   it('a rejecting onUnauthorized resets state and surfaces an error (no hang)', async () => {
     const onUnauthorized = vi.fn(() => Promise.reject(new Error('redirect start failed')))
     const api = await makeClient(onUnauthorized)
     await expect(api.organizationsApi.listOrganizations()).rejects.toBeTruthy()
     // Marker cleared so a later genuine 401 still gets its one recovery attempt.
     expect(window.sessionStorage.getItem('boxlite.reauth-attempted')).toBeNull()
+  })
+
+  it('registry requests preserve removal refusals through the shared interceptor', async () => {
+    const refusal = 'Cannot remove login while box-1 pulls through it'
+    const onUnauthorized = vi.fn()
+    const api = await makeClient(onUnauthorized, 409, { message: refusal })
+    const { BoxliteError } = await import('./errors')
+
+    const error = await api.registriesApi.deleteRegistryCredential('credential-1', 'org-1').catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(BoxliteError)
+    expect((error as Error).message).toBe(refusal)
+    expect(onUnauthorized).not.toHaveBeenCalled()
+  })
+})
+
+describe('ApiClient.setBoxInboundMode', () => {
+  it('sends the mode to the /v1 inbound route of the selected organization', async () => {
+    vi.resetModules()
+    const axios = (await import('axios')).default
+    const requests: Array<{ method?: string; url?: string; baseURL?: string; data?: string; headers?: unknown }> = []
+    axios.defaults.adapter = (async (cfg: never) => {
+      requests.push(cfg)
+      return { data: {}, status: 200, statusText: '', headers: {}, config: cfg }
+    }) as never
+    const { ApiClient } = await import('./apiClient')
+    const api = new ApiClient(config, 'tok')
+
+    await api.setBoxInboundMode('org-1', 'box-1', 'enabled')
+
+    expect(requests).toHaveLength(1)
+    const [request] = requests
+    expect(request.method).toBe('put')
+    expect(request.baseURL).toBe('http://api.test/api')
+    expect(request.url).toBe('/v1/org-1/boxes/box-1/network/inbound')
+    expect(JSON.parse(request.data ?? '')).toEqual({ mode: 'enabled' })
+    expect((request.headers as { Authorization?: string }).Authorization).toBe('Bearer tok')
+  })
+})
+
+describe('ApiClient.getTunnelUrl', () => {
+  it('asks the /v1 tunnel route for a port, as the SDK does', async () => {
+    vi.resetModules()
+    const axios = (await import('axios')).default
+    const requests: Array<{ method?: string; url?: string; params?: unknown }> = []
+    axios.defaults.adapter = (async (cfg: never) => {
+      requests.push(cfg)
+      return { data: { uri: 'https://3000-d-62.proxy.test' }, status: 200, statusText: '', headers: {}, config: cfg }
+    }) as never
+    const { ApiClient } = await import('./apiClient')
+
+    const uri = await new ApiClient(config, 'tok').getTunnelUrl('org-1', 'box-1', 3000)
+
+    expect(uri).toBe('https://3000-d-62.proxy.test')
+    expect(requests[0].method).toBe('post')
+    expect(requests[0].url).toBe('/v1/org-1/boxes/box-1/network/tunnel')
+    expect(requests[0].params).toEqual({ port: 3000 })
   })
 })
