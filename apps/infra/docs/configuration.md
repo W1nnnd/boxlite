@@ -66,6 +66,7 @@ Groups in `mstage.env.json` define what each consumer may receive:
 | Group | Consumer |
 | --- | --- |
 | `deploy` | Resource graph, public hosts, runner fleet and optional integrations |
+| `secret` | Optional marker for JSON secret references delivered to workloads |
 | `pulumi` | State passphrase input |
 | `api` | API runtime secrets and optional API integrations |
 | `proxy` | Proxy authentication and telemetry settings |
@@ -75,6 +76,26 @@ Groups in `mstage.env.json` define what each consumer may receive:
 An array group makes every key required. An object distinguishes `required` from `optional`.
 Missing required values fail before deployment. Optional values enable features only when supplied.
 The exact key list lives in the manifest; avoid maintaining a second list in a runbook.
+
+## Built-in images
+
+The curated set is the built-in `base`, `python` and `node` plus each `name=ref` entry in
+`BOXLITE_SYSTEM_IMAGES`. The dashboard lists all of it under Built-in, and every organization may
+start a box from it without admission. Add an entry only for a public image the operator maintains,
+hosted off docker.io. Tenants start any other public image by its ref.
+
+To drop the last entry, remove the key and certify the store again. To keep other entries, `env set`
+the list without it instead of `env del`.
+
+```bash
+npm run mstage env del -- BOXLITE_SYSTEM_IMAGES --stage dev
+npm run mstage env set -- --stage dev --digest
+npm run mstage env digest -- --stage dev
+```
+
+After the next API deploy the name no longer selects the image. It goes through tenant admission like
+any other image, read as the Docker Hub ref `docker.io/library/<name>:latest`, and so does the removed
+ref. A warm pool row that names either stops filling.
 
 ## Fingerprints and versions
 

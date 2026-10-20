@@ -164,6 +164,13 @@ crash handling live in the runtime, not the runner.
 | `POST` | `/boxes/:id/backup` | `CreateBackup` | Kick off async backup; updates `BackupInfoCache` |
 | `GET` | `/boxes/:id` | `Info` | Combined state + backup state + runtime version |
 
+`Create` and `Recover` take the outbound network policy as
+`outboundEnabled` and an `outboundAllowNet` entry list. `outboundEnabled` is
+required: a body without it, such as a job queued by an API that predates it,
+is rejected as an invalid argument before the runner mounts volumes, creates
+a box, or (for `Recover`) destroys the old one
+(`networkSpec` in [`pkg/boxlite/client.go`](pkg/boxlite/client.go)).
+
 `Info` is the only endpoint that fans out: it pulls live state from the
 runtime _and_ backup state from `BackupInfoCache`, then fetches the
 runtime version only when the box is `STARTED`. See
@@ -607,9 +614,10 @@ Optional features are toggled by env vars:
   `BOXLITE_SHUTDOWN_GRACE` — exec reaping timers.
 - `REGISTRY_PROXY_HOST`, `REGISTRY_PROXY_USERNAME`, `REGISTRY_PROXY_PASSWORD` —
   pull an image whose registry credentials only the platform holds through the
-  [registry proxy](../image-service/README.md). Used only when all three are set,
-  and a warning names whichever are missing. The password is this runner's own
-  API key. A proxy host also listed in `INSECURE_REGISTRIES` is reached over HTTP.
+  [registry proxy](../image-service/README.md). The password is this runner's own
+  API key, so with a host set it defaults to `BOXLITE_RUNNER_TOKEN`, and the
+  username to `runner`. A proxy host also listed in `INSECURE_REGISTRIES` is
+  reached over HTTP.
 
 Cloud hosts use the [shared runner boot logic](../infra/mdeploy/stack/runner-boot.ts)
 with cloud-specific providers; the retained AWS stack has its own bootstrap path. For local

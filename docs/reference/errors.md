@@ -82,6 +82,11 @@ Filesystem or disk operation error.
 - Permission denied writing to `~/.boxlite`
 - Disk image creation failed
 - QCOW2 operation failed
+- A registry answered an image pull with an error. The message names the
+  registry's OCI error code when it sent one: `MANIFEST_UNKNOWN` or
+  `NAME_UNKNOWN` when it does not have the image, `DENIED` or `UNAUTHORIZED`
+  when it will not serve it, as in
+  `failed to pull manifest [MANIFEST_UNKNOWN]: ...`
 
 **Example:**
 ```text
@@ -229,22 +234,22 @@ Error: internal error: unexpected state transition
 
 ### `NotFound(String)`
 
-Box or resource not found.
+The named box, image, volume or snapshot does not exist.
 
 **Cause:**
-- Box ID doesn't exist
-- Box was removed
-- Image not in cache
+- Box ID doesn't exist, or the box was removed
+- Image name not held: not in the local cache, or not in the server's catalog
+- Volume or snapshot name doesn't exist
 
 **Example:**
 ```text
-Error: box not found: 01JJNH8...
+Error: not found: 01JJNH8...
 ```
 
 **Solution:**
-- List all boxes: `await runtime.list_info()`
-- Verify box ID is correct
-- Create new box if needed
+- List what the runtime holds: `await runtime.list_info()` for boxes, `await runtime.images.list()` for images
+- Verify the ID or name is correct
+- Create the box, volume or snapshot, or use the image again, if needed
 
 ### `AlreadyExists(String)`
 
@@ -318,12 +323,33 @@ async def safe_execution():
                 print(f"Command failed: {result.stderr}")
                 return
 
-    except Exception as e:
-        # All BoxLite errors are raised as Python exceptions
-        print(f"Error: {e}")
+    except boxlite.NotFoundError:
+        # One class per error type above, each with a `code` (`not_found`
+        # here); see the Python reference's "Runtime failures" table.
+        print("No such box or image")
+    except boxlite.BoxliteError as e:
+        print(f"Error [{getattr(e, 'code', '-')}]: {e}")
 
         # Enable debug logging for details
         # RUST_LOG=debug python script.py
+```
+
+### Node.js
+
+```typescript
+import { errorCode } from 'boxlite';
+
+try {
+  await runtime.remove('no-such-box');
+} catch (err) {
+  // The same codes as Python's `code`; see the Node.js reference's
+  // `errorCode(err)` section.
+  if (errorCode(err) === 'not_found') {
+    console.log('No such box');
+  } else {
+    throw err;
+  }
+}
 ```
 
 ### Rust

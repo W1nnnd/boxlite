@@ -15,6 +15,7 @@ mod info;
 mod metrics;
 mod network;
 mod options;
+mod registries;
 mod runtime;
 mod snapshot_options;
 mod snapshots;
@@ -27,7 +28,9 @@ pub use box_handle::JsBox;
 pub use copy::JsCopyOptions;
 pub use exec::{JsExecResult, JsExecStderr, JsExecStdin, JsExecStdout, JsExecution};
 pub use git::JsGitHandle;
-pub use images::{JsImageHandle, JsImageInfo, JsImagePullResult};
+pub use images::{
+    JsImageDetail, JsImageHandle, JsImageInfo, JsImagePullResult, JsImageUsage, JsImageVersion,
+};
 pub use info::{
     JsBoxInfo, JsBoxStateInfo, JsHealthState, JsHealthStatus, JsNetworkInfo, JsPublishedPort,
 };
@@ -39,6 +42,7 @@ pub use options::{
     ApiKeyCredential, JsAccessToken, JsBoxOptions, JsEnvVar, JsHealthCheckOptions, JsImageRegistry,
     JsImageRegistryAuth, JsNetworkSpec, JsOptions, JsPortSpec, JsSecret, JsVolumeSpec,
 };
+pub use registries::{JsNewRegistryCredential, JsRegistryCredential, JsRegistryHandle};
 pub use runtime::JsBoxlite; // re-export for dist bundling
 pub use snapshot_options::{JsCloneOptions, JsExportOptions, JsSnapshotOptions};
 pub use snapshots::{JsSnapshotHandle, JsSnapshotInfo};

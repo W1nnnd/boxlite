@@ -14,6 +14,8 @@ import {
 import {
   ApiKeysApi,
   AuditApi,
+  ImagesApi,
+  RegistriesApi,
   Configuration,
   OrganizationsApi,
   RegionsApi,
@@ -23,8 +25,9 @@ import {
   VolumesApi,
   WebhooksApi,
   UsageApi as CoreUsageApi,
+  NetworkMode,
 } from '@boxlite-ai/api-client'
-import axios, { AxiosError } from 'axios'
+import axios, { AxiosError, AxiosInstance } from 'axios'
 import { BoxliteError } from './errors'
 
 // A burst of in-flight requests can all 401 at once when the access token goes
@@ -68,6 +71,7 @@ function clearReauthAttempted(): void {
 
 export class ApiClient {
   private config: Configuration
+  private http: AxiosInstance
   private onUnauthorized?: () => Promise<void> | void
   private _boxApi: BoxApi
   private _userApi: UsersApi
@@ -75,6 +79,8 @@ export class ApiClient {
   private _organizationsApi: OrganizationsApi
   private _billingApi: BillingApiClient
   private _volumeApi: VolumesApi
+  private _imageApi: ImagesApi
+  private _registriesApi: RegistriesApi
   private _auditApi: AuditApi
   private _regionsApi: RegionsApi
   private _runnersApi: RunnersApi
@@ -136,6 +142,8 @@ export class ApiClient {
       },
     )
 
+    this.http = axiosInstance
+
     // Initialize APIs
     this._boxApi = new BoxApi(this.config, undefined, axiosInstance)
     this._userApi = new UsersApi(this.config, undefined, axiosInstance)
@@ -143,6 +151,8 @@ export class ApiClient {
     this._organizationsApi = new OrganizationsApi(this.config, undefined, axiosInstance)
     this._billingApi = new BillingApiClient(config.billingApiUrl || window.location.origin, accessToken)
     this._volumeApi = new VolumesApi(this.config, undefined, axiosInstance)
+    this._imageApi = new ImagesApi(this.config, undefined, axiosInstance)
+    this._registriesApi = new RegistriesApi(this.config, undefined, axiosInstance)
     this._auditApi = new AuditApi(this.config, undefined, axiosInstance)
     this._regionsApi = new RegionsApi(this.config, undefined, axiosInstance)
     this._runnersApi = new RunnersApi(this.config, undefined, axiosInstance)
@@ -210,6 +220,34 @@ export class ApiClient {
     return new Promise<never>(() => {})
   }
 
+  /** Sets a box's inbound mode through the `/v1` route the CLI and SDKs use. */
+  public async setBoxInboundMode(organizationId: string, boxId: string, mode: NetworkMode): Promise<void> {
+    await this.http.put(this.v1BoxPath(organizationId, boxId, '/network/inbound'), { mode }, this.v1Config())
+  }
+
+  /**
+   * A public URL for one port of the box, through the route `box.network.tunnel()`
+   * uses. It needs inbound access, declares the port public, and resumes a
+   * stopped box that has auto-resume.
+   */
+  public async getTunnelUrl(organizationId: string, boxId: string, port: number): Promise<string> {
+    const response = await this.http.post<{ uri: string }>(
+      this.v1BoxPath(organizationId, boxId, '/network/tunnel'),
+      undefined,
+      { ...this.v1Config(), params: { port } },
+    )
+    return response.data.uri
+  }
+
+  private v1BoxPath(organizationId: string, boxId: string, suffix: string): string {
+    return `/v1/${encodeURIComponent(organizationId)}/boxes/${encodeURIComponent(boxId)}${suffix}`
+  }
+
+  /** `/v1` is spec-first and outside the generated client; same instance, so the same 401 handling. */
+  private v1Config() {
+    return { baseURL: this.config.basePath, headers: { Authorization: `Bearer ${this.config.accessToken}` } }
+  }
+
   public setAccessToken(accessToken: string) {
     this.config.accessToken = accessToken
   }
@@ -236,6 +274,14 @@ export class ApiClient {
 
   public get volumeApi() {
     return this._volumeApi
+  }
+
+  public get imageApi() {
+    return this._imageApi
+  }
+
+  public get registriesApi() {
+    return this._registriesApi
   }
 
   public get auditApi() {

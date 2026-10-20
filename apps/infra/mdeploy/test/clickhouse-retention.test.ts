@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { clickHouseRetentionPolicy, clickHouseStartupScript, gcpClickHouseProvider } from '../stack/providers/gcp/clickhouse.ts'
+import { awsClickHouseProvider } from '../stack/providers/aws/clickhouse.ts'
 
 test('GCP bootstrap uses 30 days while the policy uses configured hours', () => {
   const script = clickHouseStartupScript({
@@ -64,25 +65,34 @@ fi
   }
 })
 
-test('GCP retention changes preserve VM inputs while secret rotations reach the startup script', async (t) => {
+test('ClickHouse providers preserve host inputs and reconcile optional reader credentials', async (t) => {
   // Capture the actual provider boundary without contacting GCP. Outputs resolve synchronously.
   const output = (value: any): any => ({ value, apply: (fn: (value: any) => any) => output(fn(value)) })
   const resources = new Map<string, { args: any; options: any }>()
   let rotated = ''
+  let arnSuffix = ''
+  let recreated = 1
   class Resource {
     [key: string]: any
     constructor(name: string, args: any, options: any = {}) {
       resources.set(name, { args, options })
       Object.assign(this, args, {
-        id: output(name), selfLink: output(name), email: output('host@example.test'),
+        id: output(name), arn: output(`${name}-arn${arnSuffix}`), selfLink: output(name), email: output('host@example.test'),
+        instanceId: output(`${name}#${recreated}`), // A recreated VM keeps its name and self link, not its id.
         name: output(`${name}/versions/${name === rotated ? 2 : 1}`),
         networkInterfaces: [{ networkIp: '10.0.0.2' }], result: output('test-password'),
       })
     }
   }
-  const constructors = new Proxy({}, { get: () => Resource })
+  const lookups: Record<string, any> = {
+    getSubnetOutput: () => ({ availabilityZone: 'us-east-1a' }),
+    getAmiOutput: () => ({ id: output('ami') }),
+    getSecretVersionsOutput: () => ({ versions: output([{ versionId: 'current', versionStages: ['AWSCURRENT'] }]) }),
+  }
+  const constructors = new Proxy({}, { get: (_, name) => lookups[String(name)] ?? Resource })
   const globals = {
     gcp: new Proxy({}, { get: () => constructors }), random: constructors,
+    aws: new Proxy({}, { get: () => constructors }), command: { local: constructors }, $cli: { paths: { root: '/test' } },
     $app: { name: 'boxlite', stage: 'dev' },
     $util: { output, secret: output },
     $resolve: (values: any[]) => output(values.map((value) => value.value)),
@@ -96,14 +106,15 @@ test('GCP retention changes preserve VM inputs while secret rotations reach the 
       else Reflect.deleteProperty(globalThis, key)
     })
   }
-  const provider = gcpClickHouseProvider({
+  const providerConfig = {
     network: { cloud: 'gcp', network: 'network', subnetwork: 'subnet' } as any,
     project: 'project', region: 'us-central1', zone: 'us-central1-a', appShort: 'bl',
     callerRanges: ['10.0.0.0/24'], clickStackConsumerProject: 'project',
     clickStackConsumerAccount: null, managed: null, dependsOn: [],
-  })
-  const deploy = (retentionHours: number) => {
-    provider({ mode: 'self-hosted', database: 'otel', writerUsername: 'otel_writer',
+  }
+  const deploy = (retentionHours: number, otelOpenapiEnabled = false) => {
+    resources.clear()
+    gcpClickHouseProvider({ ...providerConfig, otelOpenapiEnabled })({ mode: 'self-hosted', database: 'otel', writerUsername: 'otel_writer',
       readerUsername: 'otel_reader', instanceSize: 'small', dataGb: 100, retentionHours })
     const vm = resources.get('ClickHouse')!
     const policy = resources.get('ClickHouseRetention')!.args.osPolicies[0].resourceGroups[0].resources[0].exec
@@ -117,6 +128,21 @@ test('GCP retention changes preserve VM inputs while secret rotations reach the 
     assert.notEqual(after.policy, before.policy)
     assert.match(after.policy, /INTERVAL 720 HOUR/)
   })
+  await t.test('GCP uses a separate managed secret and its version at boot', () => {
+    const enabled = deploy(720, true)
+    assert.equal(resources.get('ClickHouseOpenapiReaderSecret')!.args.secretId, 'boxlite-dev-clickhouse-openapi-reader')
+    assert.ok(resources.has('ClickHouseOpenapiReaderSecretPassword'))
+    assert.match(enabled.script, /read_secret 'ClickHouseOpenapiReaderSecretValue\/versions\/1'/)
+    assert.match(enabled.script, /CREATE USER IF NOT EXISTS "otel_openapi_reader"/)
+    assert.equal(resources.get('ClickHouseSecretAccess3')!.args.role, 'roles/secretmanager.secretAccessor')
+    assert.ok(resources.get('ClickHouse')!.options.dependsOn.some((resource: any) => resource.secretId === 'boxlite-dev-clickhouse-openapi-reader'))
+    assert.equal(deploy(720, true).script, enabled.script)
+    rotated = 'ClickHouseOpenapiReaderSecretValue'
+    assert.notEqual(deploy(720, true).script, enabled.script)
+    rotated = ''
+    assert.equal(deploy(720).script, after.script)
+    assert.ok(!resources.has('ClickHouseOpenapiReaderSecret'))
+  })
   for (const account of ['Admin', 'Writer', 'Reader']) {
     rotated = `ClickHouse${account}SecretValue`
     const rotation = deploy(720)
@@ -126,4 +152,61 @@ test('GCP retention changes preserve VM inputs while secret rotations reach the 
       assert.match(rotation.script, new RegExp(`${rotated}/versions/2`))
     })
   }
+  await t.test('a VM recreated under its own name rejoins the published group', (subtest) => {
+    const declared = (id: number) => { recreated = id; deploy(720); recreated = 1; return new Map([...resources].map(([name, { args }]) => [name, JSON.stringify(args)])) }
+    const before = declared(1)
+    const changed = [...declared(2)].filter(([name, args]) => before.get(name) !== args).map(([name]) => name)
+    assert.deepEqual(changed, ['ClickStackMembership'], 'nothing re-adds the recreated VM, so its group stays empty')
+    const { create, environment } = resources.get('ClickStackMembership')!.args
+    const env = Object.fromEntries(Object.entries(environment).map(([key, value]: [string, any]) => [key, value.value ?? value]))
+    const directory = mkdtempSync(join(tmpdir(), 'boxlite-membership-')), members = join(directory, 'members')
+    subtest.after(() => rmSync(directory, { recursive: true, force: true }))
+    // Compute Engine as the script meets it: names listed, an existing member refused, anything else unexpected.
+    writeFileSync(join(directory, 'gcloud'), `#!/bin/sh
+[ "$5 $6 $7" = "$GROUP --project=$PROJECT --zone=$ZONE" ] || exit 2
+case "$4 $8" in
+  "list-instances --format=value(instance.basename())") cat "$MEMBERS" ;;
+  "add-instances --instances=$INSTANCE") ! grep -qx "$INSTANCE" "$MEMBERS" || exit 1; echo "$INSTANCE" >> "$MEMBERS" ;;
+  *) exit 2 ;; esac
+`, { mode: 0o700 })
+    const run = (current?: string) => {
+      if (current === undefined) rmSync(members, { force: true }); else writeFileSync(members, current)
+      return spawnSync('sh', ['-c', create], { env: { ...process.env, ...env, MEMBERS: members, PATH: `${directory}:${process.env.PATH}` } }).status
+    }
+    assert.deepEqual([run(''), readFileSync(members, 'utf8')], [0, `${env.INSTANCE}\n`], 'the recreated VM joins its emptied group')
+    assert.equal(run(`${env.INSTANCE}\n`), 0, 'a VM still in its group is left alone')
+    assert.notEqual(run(), 0, 'a group that cannot be read fails the deploy')
+  })
+  await t.test('AWS uses unique secret names and propagates the returned ARN through IAM and readiness', () => {
+    const invoke = (otelOpenapiEnabled: boolean) => {
+      resources.clear()
+      return awsClickHouseProvider({
+        region: 'us-east-1', managed: null, otelOpenapiEnabled,
+        network: { cloud: 'aws', vpcId: 'vpc', vpc: { securityGroups: [] }, privateSubnets: ['subnet'] } as any,
+      })({ mode: 'self-hosted', database: 'otel', writerUsername: 'otel_writer', readerUsername: 'otel_reader',
+        instanceSize: 'small', dataGb: 100, retentionHours: 720 })
+    }
+    invoke(true)
+    const readiness = resources.get('ClickHouseDatabaseReady')!.args
+    assert.equal(resources.get('ClickHouseOpenapiReaderSecret')!.args.namePrefix, 'boxlite-dev-clickhouse-openapi-reader-')
+    assert.equal(resources.get('ClickHouseOpenapiReaderSecret')!.args.name, undefined)
+    assert.equal(resources.get('ClickHouseOpenapiReaderSecret')!.args.recoveryWindowInDays, 7)
+    assert.equal(resources.get('ClickHouseReaderSecret')!.args.namePrefix, 'boxlite-dev-clickhouse-reader-')
+    assert.equal(readiness.environment.CLICKHOUSE_OPENAPI_READER_SECRET_ARN.value, 'ClickHouseOpenapiReaderSecret-arn')
+    const sql = Buffer.from(readiness.environment.CLICKHOUSE_OPENAPI_READER_SQL_BASE64, 'base64').toString()
+    assert.match(sql, /REVOKE ALL FROM "otel_openapi_reader"/)
+    assert.ok(readiness.triggers.includes(sql))
+    assert.ok(readiness.triggers.some((value: any) => value?.value === 'ClickHouseOpenapiReaderSecretValue'))
+    assert.ok(JSON.parse(resources.get('ClickHouseSecretPolicy')!.args.policy.value).Statement[0].Resource.includes('ClickHouseOpenapiReaderSecret-arn'))
+    invoke(false)
+    assert.ok(!resources.has('ClickHouseOpenapiReaderSecret'))
+    assert.equal(resources.get('ClickHouseDatabaseReady')!.args.environment.CLICKHOUSE_OPENAPI_READER_SECRET_ARN, undefined)
+    arnSuffix = '-replacement'
+    invoke(true)
+    assert.equal(resources.get('ClickHouseDatabaseReady')!.args.environment.CLICKHOUSE_OPENAPI_READER_SECRET_ARN.value,
+      'ClickHouseOpenapiReaderSecret-arn-replacement')
+    const allowed = JSON.parse(resources.get('ClickHouseSecretPolicy')!.args.policy.value).Statement[0].Resource
+    assert.ok(allowed.includes('ClickHouseOpenapiReaderSecret-arn-replacement'))
+    assert.ok(!allowed.includes('ClickHouseOpenapiReaderSecret-arn'))
+  })
 })

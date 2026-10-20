@@ -20,11 +20,15 @@ import {
   ValidationPipe,
   Logger,
   Res,
+  ForbiddenException,
 } from '@nestjs/common'
 import { ApiTags, ApiBearerAuth, ApiResponse, ApiExcludeController } from '@nestjs/swagger'
 import { Response } from 'express'
 import { CombinedAuthGuard } from '../auth/combined-auth.guard'
-import { OrganizationResourceActionGuard } from '../organization/guards/organization-resource-action.guard'
+import {
+  OrganizationResourceActionGuard,
+  hasOrganizationResourcePermissions,
+} from '../organization/guards/organization-resource-action.guard'
 import { RequiredOrganizationResourcePermissions } from '../organization/decorators/required-organization-resource-permissions.decorator'
 import { OrganizationResourcePermission } from '../organization/enums/organization-resource-permission.enum'
 import { AuthContext } from '../common/decorators/auth-context.decorator'
@@ -41,6 +45,7 @@ import { Audit, MASKED_AUDIT_VALUE, TypedRequest } from '../audit/decorators/aud
 import { AuditAction } from '../audit/enums/audit-action.enum'
 import { AuditTarget } from '../audit/enums/audit-target.enum'
 import { CommerceBoxLimitService } from './commerce-box-limit.service'
+import { Context } from '../common/context/context'
 
 // Spec-first surface: the contract is openapi/box.openapi.yaml, not the
 // generated product spec (which `:prefix` routes would render invalid).
@@ -75,6 +80,7 @@ export class BoxliteBoxController {
   ) {}
 
   @Post()
+  @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.WRITE_BOXES])
   @HttpCode(201)
   @ApiResponse({
     status: 201,
@@ -116,15 +122,34 @@ export class BoxliteBoxController {
     @AuthContext() authContext: OrganizationAuthContext,
     @Body() dto: CreateBoxDto,
   ): Promise<BoxResponseDto> {
+    // Attaching a managed volume grants the box read/write access to its data,
+    // so it is authorized independently of WRITE_BOXES: the caller must hold the
+    // volume permissions too. WRITE_BOXES alone must not reach another key's
+    // volumes (GHSA-2qqv-7cwv-mj8h).
+    if (dto.volumes?.length) {
+      this.assertCanAttachVolumes(authContext)
+    }
+
     const organization = authContext.organization
     const createBoxDto = createBoxToCreateBox(dto)
     const maxCreatedBoxes = await this.commerceBoxLimitService.resolveMaxCreatedBoxes(organization.id)
 
-    let box = await this.boxService.create(createBoxDto, organization, { maxCreatedBoxes, actorKind: 'user' })
+    let box = await this.boxService.create(createBoxDto, organization, Context.user(), { maxCreatedBoxes })
     if (box.state !== BoxState.STARTED) {
       box = await this.boxStateWaiter.waitForStarted(box.id, organization.id, 30)
     }
     return boxToBoxResponse(box)
+  }
+
+  // Mirrors OrganizationResourceActionGuard: a system admin and an interactive
+  // owner without an API key are not permission-bounded; every other caller is
+  // bounded by the permissions its credential carries. A static route decorator
+  // cannot express this because it applies only when volumes are requested.
+  private assertCanAttachVolumes(authContext: OrganizationAuthContext): void {
+    const required = [OrganizationResourcePermission.READ_VOLUMES, OrganizationResourcePermission.WRITE_VOLUMES]
+    if (!hasOrganizationResourcePermissions(authContext, required)) {
+      throw new ForbiddenException(`Attaching a managed volume requires: ${required.join(', ')}`)
+    }
   }
 
   @Get()
@@ -174,6 +199,7 @@ export class BoxliteBoxController {
   }
 
   @Delete(':boxId')
+  @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.DELETE_BOXES])
   @HttpCode(204)
   @Audit({
     action: AuditAction.DELETE,
@@ -181,10 +207,11 @@ export class BoxliteBoxController {
     targetIdFromRequest: (req) => req.params.boxId,
   })
   async removeBox(@AuthContext() authContext: OrganizationAuthContext, @Param('boxId') boxId: string) {
-    await this.boxService.destroy(boxId, authContext.organizationId, 'user')
+    await this.boxService.destroy(boxId, authContext.organizationId, Context.user())
   }
 
   @Post(':boxId/start')
+  @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.WRITE_BOXES])
   @ApiResponse({
     status: 201,
     description: 'Box start requested',
@@ -216,6 +243,7 @@ export class BoxliteBoxController {
   }
 
   @Post(':boxId/stop')
+  @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.WRITE_BOXES])
   @ApiResponse({
     status: 201,
     description: 'Box stop requested',
@@ -231,14 +259,14 @@ export class BoxliteBoxController {
     @AuthContext() authContext: OrganizationAuthContext,
     @Param('boxId') boxId: string,
   ): Promise<BoxResponseDto> {
-    const box = await this.boxService.stop(boxId, authContext.organizationId, 'user')
+    const box = await this.boxService.stop(boxId, authContext.organizationId, Context.user())
     const dto = await this.boxService.toBoxDto(box)
     return boxToBoxResponse(dto)
   }
 
-  // The dashboard flips the same `public` flag through
-  // `POST /api/box/:id/public/:isPublic`, which requires WRITE_BOXES. Requiring
-  // it here too keeps this from being a weaker route to that operation.
+  // The dashboard, CLI and SDKs all change inbound mode here. The deprecated
+  // `POST /api/box/:id/public/:isPublic` changes the same mode and requires
+  // WRITE_BOXES, so requiring it here too keeps neither route weaker.
   @Put(':boxId/network/inbound')
   @RequiredOrganizationResourcePermissions([OrganizationResourcePermission.WRITE_BOXES])
   @ApiResponse({
@@ -247,7 +275,7 @@ export class BoxliteBoxController {
     type: InboundNetworkSpecDto,
   })
   @Audit({
-    action: AuditAction.UPDATE_PUBLIC_STATUS,
+    action: AuditAction.UPDATE_INBOUND_ACCESS,
     targetType: AuditTarget.BOX,
     targetIdFromRequest: (req) => req.params.boxId,
     requestMetadata: {
@@ -259,8 +287,8 @@ export class BoxliteBoxController {
     @Param('boxId') boxId: string,
     @Body() dto: InboundNetworkSpecDto,
   ): Promise<InboundNetworkSpecDto> {
-    const box = await this.boxService.updatePublicStatus(boxId, dto.mode === 'enabled', authContext.organizationId)
-    return { mode: box.public ? 'enabled' : 'disabled' }
+    const box = await this.boxService.updateInboundEnabled(boxId, dto.mode === 'enabled', authContext.organizationId)
+    return { mode: box.inboundEnabled ? 'enabled' : 'disabled' }
   }
 
   private isStartAlreadyInProgress(box: Box): boolean {

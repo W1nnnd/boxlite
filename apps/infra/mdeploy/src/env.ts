@@ -171,21 +171,8 @@ export const rolloutGroups = (config: Pick<MstageConfig, 'envSelectGroup'>): str
   config.envSelectGroup[SECRET_GROUP] ? [...ROLLOUT_GROUPS, SECRET_GROUP] : [...ROLLOUT_GROUPS]
 
 /**
- * An address is delivered to a workload, so the deploy's own group cannot hold
- * one.
- *
- * mstage asks only that some group other than the marker names a marked key,
- * which is as much as a tool that does not know this repository's groups can
- * ask. `deploy` satisfies that and is still the wrong answer: what the deploy
- * spends it reads out of its own process environment, and there is no platform
- * standing between the store and that read to resolve anything. A marked key
- * there would be spent as the text of an address — a Cloudflare token that is
- * an ARN, refused by Cloudflare rather than by anything here.
- *
- * Nor would resolving it be the fix. The point of the channel is that the
- * secret reaches a container without travelling through the deploy; a deploy
- * that read one to spend it would be the case the whole arrangement exists to
- * avoid.
+ * Refuse references for credentials the deploy spends itself: only a workload's
+ * platform resolves addresses into secret values.
  */
 export const assertAddressesAreNotSpent = (config: Pick<MstageConfig, 'envSelectGroup' | 'path'>): void => {
   const marked = config.envSelectGroup[SECRET_GROUP]

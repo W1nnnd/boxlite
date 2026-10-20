@@ -23,7 +23,9 @@ describe('JobStateHandlerService business events', () => {
     const box = { id: 'box-1', organizationId, desiredState }
     const boxRepository = { findOne: jest.fn().mockResolvedValue(box), update } as any
     const redisLockProvider = { unlock: jest.fn().mockResolvedValue(undefined) } as any
-    return new JobStateHandlerService(boxRepository, redisLockProvider, {} as any)
+    // A failed create or start asks for the pull failure's reason; pass the job's own through.
+    const pullFailures = { reasonFor: jest.fn(async (_box: unknown, reason: string) => reason) } as any
+    return new JobStateHandlerService(boxRepository, redisLockProvider, {} as any, pullFailures)
   }
 
   function job(type: JobType, status: JobStatus, errorMessage?: string): Job {
@@ -49,7 +51,6 @@ describe('JobStateHandlerService business events', () => {
       name: 'box.create',
       outcome: 'exception',
       correlationId: 'box-1',
-      orgId: 'org-1',
       exceptionType: 'runner_job_failed',
     })
   })
@@ -63,7 +64,6 @@ describe('JobStateHandlerService business events', () => {
       name: 'box.delete',
       outcome: 'success',
       correlationId: 'box-1',
-      orgId: 'org-1',
     })
   })
 
@@ -76,7 +76,6 @@ describe('JobStateHandlerService business events', () => {
       name: 'box.stop',
       outcome: 'success',
       correlationId: 'box-1',
-      orgId: 'org-1',
     })
   })
 

@@ -24,8 +24,8 @@ use crate::disk::Disk;
 use crate::event_listener::EventListener;
 #[cfg(target_os = "linux")]
 use crate::fs::BindMountHandle;
-use crate::litebox::BoxTunnel;
 use crate::litebox::copy::{CopyOptions, CopySourceKind};
+use crate::litebox::{BoxConnection, BoxTunnel};
 use crate::lock::LockGuard;
 use crate::metrics::{BoxMetrics, BoxMetricsStorage};
 use crate::net::NetworkBackend;
@@ -1625,9 +1625,9 @@ impl crate::runtime::backend::BoxNetworkBackend for BoxImpl {
             .network
             .clone()
             .ok_or_else(|| BoxliteError::Unsupported("box networking is disabled".into()))?;
-        Ok(BoxTunnel::local(
-            network.tunnel(target).await?.into_owned_fd()?,
-        ))
+        Ok(BoxTunnel::new(None, async move {
+            BoxConnection::from_fd(network.tunnel(target).await?.into_owned_fd()?)
+        }))
     }
 }
 
@@ -1847,6 +1847,7 @@ mod tests {
         let runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
+            ..Default::default()
         })
         .expect("create runtime");
         let (guest_session, server) = start_stub_guest(gate).await;
@@ -2087,6 +2088,7 @@ mod tests {
         let runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
+            ..Default::default()
         })
         .expect("create runtime");
 
@@ -2258,6 +2260,7 @@ mod tests {
         let mut runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
+            ..Default::default()
         })
         .expect("create runtime");
         Arc::get_mut(&mut runtime)
@@ -2309,6 +2312,7 @@ mod tests {
         let runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
+            ..Default::default()
         })
         .expect("create runtime");
         let requested = PortSpec {
@@ -2394,6 +2398,7 @@ mod tests {
         let runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
+            ..Default::default()
         })
         .expect("create runtime");
 
@@ -2437,6 +2442,7 @@ mod tests {
         let runtime = RuntimeImpl::new_for_test(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
             image_registries: vec![],
+            ..Default::default()
         })
         .expect("create runtime");
 
