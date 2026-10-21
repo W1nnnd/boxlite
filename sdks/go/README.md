@@ -274,10 +274,7 @@ if err := git.SetConfig(ctx, "core.autocrlf", "input", &boxlite.GitConfigOptions
 }); err != nil {
 	log.Fatal(err)
 }
-email, err := git.GetConfig(ctx, "user.email", &boxlite.GitConfigOptions{
-	Scope: "local",
-	Path:  "/workspace/repo",
-})
+email, err := git.GetConfig(ctx, "user.email", nil)
 if err != nil {
 	log.Fatal(err)
 }
