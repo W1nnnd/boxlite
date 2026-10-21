@@ -420,8 +420,8 @@ await box.git.setConfig(
 const email = await box.git.getConfig("user.email");
 ```
 
-`JsGitStatus` has `currentBranch` (null when detached), `upstream`, `ahead`,
-`behind`, `branchPublished`, `headCommit` (null on an unborn branch), and
+`JsGitStatus` has `currentBranch` (absent when detached), `upstream`, `ahead`,
+`behind`, `branchPublished`, `headCommit` (absent on an unborn branch), and
 `fileStatus: JsGitFileStatus[]` (empty when clean). Each entry has `path`,
 `origPath`, `indexStatus`, `worktreeStatus`, `staged`, `untracked`.
 `JsGitBranches` has `current` and `names`.
