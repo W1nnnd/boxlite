@@ -78,7 +78,8 @@ impl GitFileStatus {
 
 /// Result of [`GitHandle::status`]. `current_branch` is `None` when HEAD is
 /// detached, `head_commit` is `None` on an unborn branch, and
-/// `branch_published` means the upstream exists.
+/// `branch_published` is true only when Git reports ahead/behind counts
+/// (`branch.ab`), so a configured upstream whose ref is gone leaves it false.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitStatus {
     pub current_branch: Option<String>,

@@ -436,7 +436,7 @@ await box.git.configure_user("BoxLite Bot", "bot@boxlite.ai")
 await box.git.set_config(
     "core.autocrlf", "input", scope="local", path="/workspace/repo"
 )
-email = await box.git.get_config("user.email", scope="local", path="/workspace/repo")
+email = await box.git.get_config("user.email")
 
 st = await box.git.status("/workspace/repo")
 if st.file_status:

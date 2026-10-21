@@ -415,11 +415,7 @@ await box.git.setConfig(
   "local",
   "/workspace/repo",
 );
-const email = await box.git.getConfig(
-  "user.email",
-  "local",
-  "/workspace/repo",
-);
+const email = await box.git.getConfig("user.email");
 ```
 
 ---

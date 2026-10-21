@@ -16,6 +16,12 @@ pub struct JsGitHandle {
     pub(crate) handle: Arc<LiteBox>,
 }
 
+impl std::fmt::Debug for JsGitHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsGitHandle").finish_non_exhaustive()
+    }
+}
+
 #[napi]
 impl JsGitHandle {
     /// Set `user.name` and `user.email` for commits in this box.

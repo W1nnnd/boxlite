@@ -578,17 +578,16 @@ git.set_config(
     Some("/workspace/repo"),
 )
 .await?;
-let email = git
-    .get_config("user.email", Some("local"), Some("/workspace/repo"))
-    .await?;
+let email = git.get_config("user.email", None, None).await?;
 ```
 
 The handle runs `git` through the box backend, so the same methods work
 on a local runtime and against a served REST runtime.
 
 `GitStatus` has `current_branch: Option<String>` (`None` when HEAD is
-detached), `upstream`, `ahead`, `behind`, `branch_published` (the upstream
-exists), `head_commit` (`None` on an unborn branch), and
+detached), `upstream`, `ahead`, `behind`, `branch_published` (true when Git
+reports ahead/behind counts, i.e. the upstream ref exists; false when no
+upstream is set or it is gone), `head_commit` (`None` on an unborn branch), and
 `file_status: Vec<GitFileStatus>`, empty on a clean tree. Each
 `GitFileStatus` carries `path`, `orig_path` (rename/copy source),
 `index_status` and `worktree_status` (porcelain v2 XY codes), plus

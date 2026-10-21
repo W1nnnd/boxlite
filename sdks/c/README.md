@@ -642,7 +642,9 @@ BoxliteErrorCode boxlite_git_get_config(
 `scope` or `path` to use the defaults. `"local"` requires `path`.
 
 `Ok` means the request was queued. Completions run later on
-`boxlite_runtime_drain()`. On a successful `boxlite_git_get_config()`, the
+`boxlite_runtime_drain()`. The `CBoxliteError*` passed to a Git callback is
+borrowed: do not free it; the dispatcher releases it after the callback returns.
+On a successful `boxlite_git_get_config()`, the
 callback owns the non-NULL string and must free it with `boxlite_free_string()`.
 `boxlite_git_free()` accepts NULL and does not affect the box handle.
 
